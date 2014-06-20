@@ -1,0 +1,6421 @@
+CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle_C2 IS
+--Перевод в карантин по коду операции
+PROCEDURE Set_Flag_By_Idoper(aIdOper  IN INTEGER,
+ Anewflag IN INTEGER,
+ Astate   IN INTEGER) IS
+BEGIN
+UPDATE Operrequest
+SET    Flag = Anewflag, State = Decode(Nvl(Astate, 0), 0, State, Astate)
+WHERE  Idoper = aIdOper;
+END;
+--Перевод в карантин по коду запроса ГО
+PROCEDURE Set_Flag_By_Idrequest(aIdRequest IN INTEGER,
+ Anewflag   IN INTEGER,
+ Astate     IN INTEGER) IS
+BEGIN
+UPDATE Request
+SET    Flag = Anewflag, Livestate = Decode(Nvl(Astate, 0), 0, Livestate, Astate)
+WHERE  Idrequest = aIdRequest;
+END;
+--Перевод в карантин по коду объекта
+PROCEDURE Set_Flag_By_Idcard(Aidcard  IN INTEGER,
+ Anewflag IN INTEGER) IS
+BEGIN
+UPDATE Cardobj
+SET    Flag = Anewflag
+WHERE  Idcard = Aidcard;
+END;
+--Установка статуса операции (OperRequest): все операции на указанной станции с указанным приоритетом
+/*procedure SET_OPERREQUEST_STATE(aIdRequest in integer, aIdSprLiveRequest in integer, aIdOrder in integer, aOldState in integer, aNewState in integer, isTrigger in integer := 0) is
+   begin
+     update OperRequest
+       set State = aNewState
+       where (State = aOldState or aOldState = 0)
+             and IdSprLiveRequest = aIdSprLiveRequest
+             and IdRequest = aIdRequest
+             and IdOrder = aIdOrder;
+     if isTrigger = 0 then
+       commit;
+     end if;
+   end;*/
+--Сбросить счетчик OPERREQUEST
+PROCEDURE Reset_Or_Counter(Aidsproperrequest IN INTEGER,
+aIdOper           IN INTEGER,
+Istrigger         IN INTEGER := 0) IS
+Vretrycount INTEGER;
+BEGIN
+SELECT Retrycount
+INTO   Vretrycount
+FROM   Sproperrequest
+WHERE  Idsproperrequest = Aidsproperrequest;
+UPDATE Operrequest
+SET    Retrycount = Vretrycount
+WHERE  Idoper = aIdOper;
+IF Istrigger = 0 THEN
+COMMIT;
+END IF;
+END;
+--Перевод Операции, Запроса и Объекта в карантин
+PROCEDURE Set_Flag_On_Rorc_By_Idoper(aIdOper   IN INTEGER,
+Anewflag  IN INTEGER,
+Astate    IN INTEGER,
+Istrigger IN INTEGER := 0) IS
+Vidcard           INTEGER;
+Vidrequest        INTEGER;
+Vidsproperrequest INTEGER;
+BEGIN
+SELECT Nvl(r.Idcard, 0), o.Idrequest, Idsproperrequest
+INTO   Vidcard, Vidrequest, Vidsproperrequest
+FROM   Operrequest o
+LEFT   JOIN Request r ON (r.Idrequest = o.Idrequest)
+WHERE  o.Idoper = aIdOper;
+Set_Flag_By_Idoper(aIdOper, Anewflag, Nvl(Astate, 0));
+IF Anewflag > 0 THEN
+Reset_Or_Counter(Vidsproperrequest, aIdOper, 1);
+END IF;
+Set_Flag_By_Idrequest(Vidrequest, Anewflag, Nvl(Astate, 0));
+IF Vidcard > 0 THEN
+Set_Flag_By_Idcard(Vidcard, Anewflag);
+END IF;
+IF Istrigger = 0 THEN
+COMMIT;
+END IF;
+END;
+--Перевод Запроса и Объекта в карантин
+PROCEDURE Set_Flag_On_Rc_By_Idrequest(aIdRequest IN INTEGER,
+ Anewflag   IN INTEGER,
+ Astate     IN INTEGER,
+ Istrigger  IN INTEGER := 0) IS
+Vidcard INTEGER;
+BEGIN
+SELECT Nvl(Idcard, 0)
+INTO   Vidcard
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+Set_Flag_By_Idrequest(aIdRequest, Anewflag, Nvl(Astate, 0));
+IF Vidcard > 0 THEN
+Set_Flag_By_Idcard(Vidcard, Anewflag);
+END IF;
+IF Istrigger = 0 THEN
+COMMIT;
+END IF;
+END;
+--Установка статуса операции (OperRequest): по коду idoper
+PROCEDURE Set_Operrequest_State(aIdRequest IN INTEGER,
+ aIdOper    IN INTEGER,
+ Aoldstate  IN INTEGER,
+ Anewstate  IN INTEGER,
+ Istrigger  IN INTEGER := 0) IS
+BEGIN
+UPDATE Operrequest
+SET    State = Anewstate, Flag = Decode(Anewstate, Pkg_Constants.State_Suspended, 1, Flag)
+WHERE  (State = Aoldstate OR Aoldstate = 0)
+AND    Idoper = aIdOper
+AND    Idrequest = aIdRequest;
+IF Istrigger = 0 THEN
+COMMIT;
+END IF;
+END;
+--Получить список операций отправки, на которые ожидаем ответы
+FUNCTION Getlistoperwaitinganswer(aIdOper       IN INTEGER,
+Asendidtpoper IN INTEGER) RETURN Operwaitinganswertbl
+PIPELINED IS
+Out_Rec Operwaitinganswerrec;
+Vidoper_Prev   INTEGER;
+Vidtpoper_Prev INTEGER;
+Vflaganswer    INTEGER;
+BEGIN
+SELECT Nvl(Idoper_Prev, 0)
+INTO   Vidoper_Prev
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+IF Vidoper_Prev > 0 THEN
+Vflaganswer := 0;
+IF Asendidtpoper > 0 THEN
+SELECT Idtpoper, Decode(Nvl(Flaganswer, 0), 0, 0, 1)
+INTO   Vidtpoper_Prev, Vflaganswer
+FROM   Operrequest
+WHERE  Idoper = Vidoper_Prev;
+IF Vidtpoper_Prev <> Asendidtpoper THEN
+Vidoper_Prev := 0;
+END IF;
+END IF;
+IF Vidoper_Prev > 0 THEN
+Out_Rec.Idoper     := Vidoper_Prev;
+Out_Rec.Flaganswer := Vflaganswer;
+PIPE ROW(Out_Rec);
+END IF;
+ELSE
+FOR Coperlist IN (SELECT Idoper, Decode(Nvl(Flaganswer, 0), 0, 0, 1) Flaganswer
+FROM   Operrequest
+WHERE  (Idoper_Next = aIdOper OR Idoper_Alter_Next = aIdOper)
+AND    (Idtpoper IN (Asendidtpoper) OR Asendidtpoper = 0) --aSendIdTpOper: MAC_SEND_REQ_TO_USBS, MAC_SEND_RES_TO_GO, MAC_GEN_XML_OZI
+) LOOP
+Out_Rec.Idoper     := Coperlist.Idoper;
+Out_Rec.Flaganswer := Coperlist.Flaganswer;
+PIPE ROW(Out_Rec);
+END LOOP;
+END IF;
+RETURN;
+END;
+--Установка операции получения ответов из смежных систем в статус "Выполнена"
+PROCEDURE Set_Finish_Wayting_Answer_Ss(aIdOper       IN INTEGER,
+Asendidtpoper IN INTEGER,
+Istrigger     IN INTEGER := 0) IS
+Vcntoutall      INTEGER;
+Vcntoutgotreply INTEGER;
+BEGIN
+SELECT COUNT(Idoper), SUM(Flaganswer)
+INTO   Vcntoutall, Vcntoutgotreply
+FROM   TABLE(Getlistoperwaitinganswer(aIdOper, Asendidtpoper));
+IF Vcntoutall = Vcntoutgotreply THEN
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+IF Istrigger = 0 THEN
+COMMIT;
+END IF;
+END IF;
+END;
+--Возврадает DT, если DT рабочий день; или предыдущий рабочий день, если DT - выходной
+FUNCTION Prevworkday(Adt IN DATE) RETURN DATE IS
+Res DATE;
+BEGIN
+SELECT MAX(Opdate)
+INTO   Res
+FROM   Calendar
+WHERE  Is_Holiday = 0
+AND    Opdate <= Adt;
+RETURN Res;
+END;
+--Возврадает DT, если DT рабочий день; или следуюший рабочий день, если DT - выходной
+FUNCTION Nextworkday(Adt IN DATE) RETURN DATE IS
+Res DATE;
+BEGIN
+SELECT MIN(Opdate)
+INTO   Res
+FROM   Calendar
+WHERE  Is_Holiday = 0
+AND    Opdate >= Adt;
+RETURN Res;
+END;
+--Возвращает DT, если DT выходной день; или следуюший выходной день, если DT - рабочий
+FUNCTION Nextholiday(Adt IN DATE) RETURN DATE IS
+Res DATE;
+BEGIN
+SELECT MIN(Opdate)
+INTO   Res
+FROM   Calendar
+WHERE  Is_Holiday = 1
+AND    Opdate >= Adt;
+RETURN Res;
+END;
+--Возвращает DT, если DT выходной день; или предыдущий выходной день, если DT - рабочий
+FUNCTION Prevholiday(Adt IN DATE) RETURN DATE IS
+Res DATE;
+BEGIN
+SELECT MAX(Opdate)
+INTO   Res
+FROM   Calendar
+WHERE  Is_Holiday = 1
+AND    Opdate <= Adt;
+RETURN Res;
+END;
+--Возвращает время старта по маске времени старта
+FUNCTION Gettimestart(Masktimestart IN VARCHAR2) RETURN DATE IS
+Str     VARCHAR2(255);
+Vsubstr VARCHAR2(3);
+Timestart DATE;
+Dtstart   DATE;
+BEGIN
+Str := Upper(TRIM(Masktimestart));
+IF Instr(Str, 'EWD') > 0 THEN
+Vsubstr := 'EWD';
+Dtstart := Nextworkday(Trunc(SYSDATE));
+ELSIF Instr(Str, 'EHD') > 0 THEN
+Vsubstr := 'EHD';
+Dtstart := Nextholiday(Trunc(SYSDATE));
+ELSIF Instr(Str, 'ED') > 0 THEN
+Vsubstr := 'ED';
+Dtstart := Trunc(SYSDATE);
+ELSIF Str LIKE 'W%' THEN
+Vsubstr := 'W';
+Dtstart := SYSDATE + Gettimeout(Substr(Str, 2)) / 86400;
+ELSE
+Timestart := To_Date(Str, 'HH24:MI:SS');
+IF Timestart IS NULL THEN
+RETURN(SYSDATE);
+END IF;
+Dtstart := To_Date(To_Char(SYSDATE, 'DD.MM.YYYY ') || To_Char(Timestart, 'HH24:MI:SS'), 'DD.MM.YYYY HH24:MI:SS');
+IF Dtstart < SYSDATE THEN
+Dtstart := Dtstart + 1;
+END IF;
+RETURN Dtstart;
+END IF;
+IF Vsubstr <> 'W' THEN
+Str := Substr(Str, Instr(Str, Vsubstr) + Length(Vsubstr));
+BEGIN
+Timestart := To_Date(Str, 'HH24:MI:SS');
+Dtstart := To_Date(To_Char(Dtstart, 'DD.MM.YYYY ') || To_Char(Timestart, 'HH24:MI:SS'), 'DD.MM.YYYY HH24:MI:SS');
+IF Dtstart < SYSDATE THEN
+IF Vsubstr = 'EWD' THEN
+Dtstart := To_Date(To_Char(Nextworkday(Trunc(Dtstart) + 1), 'DD.MM.YYYY ') || To_Char(Timestart, 'HH24:MI:SS'),
+'DD.MM.YYYY HH24:MI:SS');
+ELSIF Vsubstr = 'EHD' THEN
+Dtstart := To_Date(To_Char(Nextholiday(Trunc(Dtstart) + 1), 'DD.MM.YYYY ') || To_Char(Timestart, 'HH24:MI:SS'),
+'DD.MM.YYYY HH24:MI:SS');
+ELSIF Vsubstr = 'ED' THEN
+Dtstart := To_Date(To_Char(Trunc(Dtstart) + 1, 'DD.MM.YYYY ') || To_Char(Timestart, 'HH24:MI:SS'), 'DD.MM.YYYY HH24:MI:SS');
+END IF;
+END IF;
+EXCEPTION
+WHEN OTHERS THEN
+RETURN Dtstart;
+END;
+END IF;
+RETURN Dtstart;
+EXCEPTION
+WHEN OTHERS THEN
+RETURN(SYSDATE);
+END;
+--Возвращает предельное время по маске времени старта
+FUNCTION Gettimestop(Masktimestart IN VARCHAR2) RETURN DATE IS
+Str     VARCHAR2(255);
+Vsubstr VARCHAR2(3);
+Timestart DATE;
+Dtstop    DATE;
+BEGIN
+Str := Upper(TRIM(Masktimestart));
+IF Instr(Str, 'EWD') > 0 THEN
+Vsubstr := 'EWD';
+Dtstop  := Prevworkday(Trunc(SYSDATE));
+ELSIF Instr(Str, 'EHD') > 0 THEN
+Vsubstr := 'EHD';
+Dtstop  := Prevholiday(Trunc(SYSDATE));
+ELSIF Instr(Str, 'ED') > 0 THEN
+Vsubstr := 'ED';
+Dtstop  := Trunc(SYSDATE);
+ELSE
+Timestart := To_Date(Str, 'HH24:MI:SS');
+IF Timestart IS NULL THEN
+RETURN(SYSDATE);
+END IF;
+Dtstop := To_Date(To_Char(SYSDATE, 'DD.MM.YYYY ') || To_Char(Timestart, 'HH24:MI:SS'), 'DD.MM.YYYY HH24:MI:SS');
+RETURN Dtstop;
+END IF;
+Str := Substr(Str, Instr(Str, Vsubstr) + Length(Vsubstr));
+BEGIN
+Timestart := To_Date(Str, 'HH24:MI:SS');
+Dtstop := To_Date(To_Char(Dtstop, 'DD.MM.YYYY ') || To_Char(Timestart, 'HH24:MI:SS'), 'DD.MM.YYYY HH24:MI:SS');
+EXCEPTION
+WHEN OTHERS THEN
+RETURN Dtstop;
+END;
+RETURN Dtstop;
+EXCEPTION
+WHEN OTHERS THEN
+RETURN(SYSDATE);
+END;
+--Возвращает в секундах таймаут по маске таймаута
+FUNCTION Gettimeout(Masktimeout IN VARCHAR2) RETURN INTEGER IS
+Str VARCHAR2(255);
+Pos INTEGER;
+Res    INTEGER;
+Subres INTEGER;
+Tchar  CHAR;
+BEGIN
+Str   := Upper(TRIM(Masktimeout));
+Tchar := Regexp_Substr(Str, '[D,H,M,S]');
+Res := 0;
+LOOP
+Pos := Instr(Str, Tchar);
+IF Pos > 1 THEN
+Subres := To_Number(Substr(Str, 1, Pos - 1));
+IF Tchar = 'D' THEN
+Subres := Subres * 86400;
+ELSIF Tchar = 'H' THEN
+Subres := Subres * 3600;
+ELSIF Tchar = 'M' THEN
+Subres := Subres * 60;
+ELSIF Tchar = 'S' THEN
+NULL;
+ELSE
+Subres := 0;
+END IF;
+Res := Res + Subres;
+Str   := Substr(Str, Pos + 1);
+Tchar := Regexp_Substr(Str, '[D,H,M,S]');
+ELSE
+Res := 0;
+EXIT;
+END IF;
+EXIT WHEN Tchar IS NULL;
+END LOOP;
+IF Res = 0 THEN
+Res := 3600;
+END IF;
+RETURN Res;
+EXCEPTION
+WHEN OTHERS THEN
+Res := 3600;
+RETURN Res;
+END;
+--Возвращает следующее значение счетчика сообщений в разрезе филиалов по годам
+FUNCTION Getnextvalmsgcounter(Afilial IN INTEGER) RETURN INTEGER IS
+Cnt   INTEGER;
+Curdt DATE;
+Fydt  DATE;
+Res   INTEGER;
+BEGIN
+Curdt := Trunc(SYSDATE);
+Fydt := Trunc(Curdt, 'YY');
+IF Afilial IS NOT NULL THEN
+SELECT COUNT(*)
+INTO   Cnt
+FROM   Msgcounter
+WHERE  Filial = Afilial
+AND    Dt = Fydt;
+IF Cnt > 0 THEN
+SELECT Counter
+INTO   Res
+FROM   Msgcounter
+WHERE  Filial = Afilial
+AND    Dt = Fydt;
+UPDATE Msgcounter
+SET    Counter = Counter + 1
+WHERE  Filial = Afilial
+AND    Dt = Fydt;
+COMMIT;
+ELSE
+Res := 1;
+INSERT INTO Msgcounter
+(Idmsgcounter, Filial, Counter, Dt)
+VALUES
+(Genid_Msgcounter.Nextval, Afilial, 2, Fydt);
+COMMIT;
+END IF;
+ELSE
+Res := 0;
+END IF;
+RETURN Res;
+EXCEPTION
+WHEN OTHERS THEN
+RETURN 0;
+END;
+--Возвращает следующее значение счетчика номеров файла в разрезе филиалов
+FUNCTION Getnextvalfilenumber(Afilial IN INTEGER) RETURN INTEGER IS
+Cnt   INTEGER;
+Curdt DATE;
+Res   INTEGER;
+BEGIN
+IF Afilial IS NOT NULL THEN
+Curdt := Trunc(SYSDATE);
+SELECT COUNT(*)
+INTO   Cnt
+FROM   Fileidcounter
+WHERE  Filial = Afilial
+AND    Dt = Curdt;
+IF Cnt > 0 THEN
+SELECT Counter
+INTO   Res
+FROM   Fileidcounter
+WHERE  Filial = Afilial
+AND    Dt = Curdt;
+UPDATE Fileidcounter
+SET    Counter = Counter + 1
+WHERE  Filial = Afilial
+AND    Dt = Curdt;
+COMMIT;
+ELSE
+Res := 1;
+INSERT INTO Fileidcounter
+(Idfilecounter, Filial, Counter, Dt)
+VALUES
+(Genid_Fileidcounter.Nextval, Afilial, 2, Curdt);
+COMMIT;
+END IF;
+ELSE
+Res := 0;
+END IF;
+RETURN Res;
+EXCEPTION
+WHEN OTHERS THEN
+RETURN 0;
+END;
+--Возвращает атрибуты e-mail сообщения
+PROCEDURE Getemailattr(aIdRequest  IN INTEGER,
+ Aidtpemail  IN INTEGER,
+ Afilial     IN INTEGER,
+ aIdOperator IN INTEGER,
+ 
+ Amailfrom    OUT VARCHAR2,
+ Amailto      OUT VARCHAR2,
+ Amailtocopy  OUT VARCHAR2,
+ Athememask   OUT VARCHAR2,
+ Amsgbodymask OUT VARCHAR2) IS
+Vemailoperator VARCHAR2(1024);
+Vfileinname    VARCHAR2(50);
+BEGIN
+Amailfrom    := NULL;
+Amailto      := NULL;
+Amailtocopy  := NULL;
+Athememask   := NULL;
+Amsgbodymask := NULL;
+Vfileinname := NULL;
+BEGIN
+SELECT Mailto, Mailtocopy, Thememask, Msgbodymask
+INTO   Amailto, Amailtocopy, Athememask, Amsgbodymask
+FROM   Emailmsgset
+WHERE  Idtpemail = Aidtpemail
+AND    Filial = Afilial;
+EXCEPTION
+WHEN OTHERS THEN
+NULL;
+END;
+IF Amailto IS NULL THEN
+BEGIN
+SELECT Mailto, Mailtocopy, Thememask, Msgbodymask
+INTO   Amailto, Amailtocopy, Athememask, Amsgbodymask
+FROM   Emailmsgset
+WHERE  Idtpemail = Aidtpemail
+AND    Filial = 0;
+EXCEPTION
+WHEN OTHERS THEN
+RETURN;
+END;
+END IF;
+IF Instr(Amailto, '#operator') > 0 THEN
+BEGIN
+SELECT Email
+INTO   Vemailoperator
+FROM   Sprwork
+WHERE  Idwork = aIdOperator;
+EXCEPTION
+WHEN OTHERS THEN
+Vemailoperator := NULL;
+END;
+Amailto := REPLACE(Amailto, '#operator', Vemailoperator);
+END IF;
+IF Amailto IS NULL THEN
+RETURN;
+END IF;
+Amailfrom := Pkg_Globalconst.Get_Svalbyname('MAILFROM');
+IF Instr(Athememask, '#fileinname') > 0 THEN
+IF Vfileinname IS NULL THEN
+BEGIN
+SELECT Filename
+INTO   Vfileinname
+FROM   Importozi_Dt
+WHERE  Idrequest = aIdRequest;
+EXCEPTION
+WHEN No_Data_Found THEN
+Vfileinname := NULL;
+END;
+END IF;
+Athememask := REPLACE(Athememask, '#fileinname', Vfileinname);
+END IF;
+IF Instr(Amsgbodymask, '#fileinname') > 0 THEN
+IF Vfileinname IS NULL THEN
+BEGIN
+SELECT Filename
+INTO   Vfileinname
+FROM   Importozi_Dt
+WHERE  Idrequest = aIdRequest;
+EXCEPTION
+WHEN No_Data_Found THEN
+Vfileinname := NULL;
+END;
+END IF;
+Amsgbodymask := REPLACE(Amsgbodymask, '#fileinname', Vfileinname);
+END IF;
+EXCEPTION
+WHEN OTHERS THEN
+RETURN;
+END;
+--Генерирует и возвращает имя файла для отправки в ГО
+FUNCTION Genfilenameoutgo(aIdRequest IN INTEGER) RETURN VARCHAR2 IS
+Vnamemsg      VARCHAR2(100);
+Vtpmsg        INTEGER;
+Vfilenamepref VARCHAR2(10);
+Vidtpprimacy  INTEGER;
+Vfilial       INTEGER;
+Vmfo          VARCHAR2(12);
+Vcodefo       VARCHAR2(24);
+Vkgrko        VARCHAR2(4);
+Vmsgnumber    INTEGER;
+Vtpclientacc  INTEGER;
+Vnumprimacy   VARCHAR2(2);
+Afilial       INTEGER;
+BEGIN
+SELECT Filenamepref, Tpmsg, Idtpprimacy, Filial, Tpclientacc, Numprimacy, Filial, Idnumberaccdt
+INTO   Vfilenamepref, Vtpmsg, Vidtpprimacy, Vfilial, Vtpclientacc, Vnumprimacy, Afilial, Vmsgnumber
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+--Префикс R
+Vnamemsg := Lpad(Substr(Vfilenamepref, 1, 3), 3, 'R');
+--X
+IF Vtpmsg IN (1, 5) THEN
+Vnamemsg := Vnamemsg || '0';
+ELSIF Vtpmsg IN (2, 6) THEN
+Vnamemsg := Vnamemsg || '2';
+ELSE
+Vnamemsg := Vnamemsg || '1';
+END IF;
+--a
+Vnamemsg := Vnamemsg || Substr(To_Char(Vidtpprimacy), 1, 1);
+--bbbbbbb
+SELECT Mfo, Kgrko
+INTO   Vmfo, Vkgrko
+FROM   Office
+WHERE  Filial = Vfilial
+AND    Tpoffice = 0
+AND    Isstruct = 1
+AND    Active = 1;
+Vnamemsg := Vnamemsg || Lpad(Substr(Vmfo, 3, 7), 7, '0');
+Vnamemsg := Vnamemsg || '_';
+--LLLL
+SELECT Snumclient
+INTO   Vcodefo
+FROM   Office
+WHERE  Filial = Vfilial
+AND    Tpoffice = 0
+AND    Isstruct = 100
+AND    Idmaster = 0
+AND    Active = 1;
+Vnamemsg := Vnamemsg || Lpad(Substr(Vcodefo, 1, 4), 4, '0');
+--DDDDDDDD
+Vnamemsg := Vnamemsg || To_Char(SYSDATE, 'YYYYMMDD');
+Vnamemsg := Vnamemsg || '_';
+--RRRR
+Vnamemsg := Vnamemsg || Lpad(Substr(Vkgrko, 1, 4), 4, '0');
+--FFFF
+Vnamemsg := Vnamemsg || Lpad(Substr(To_Char(Vfilial), 1, 4), 4, '0');
+--GG
+Vnamemsg := Vnamemsg || Substr(To_Char(SYSDATE, 'YYYY'), 3, 2);
+--NNNNNNNN
+Vnamemsg := Vnamemsg || Lpad(Substr(To_Char(Vmsgnumber), 1, 8), 8, '0');
+Vnamemsg := Vnamemsg || '_';
+--K = #MM
+--#
+Vnamemsg := Vnamemsg || Substr(To_Char(Vtpclientacc), 1, 1);
+--MM
+Vnamemsg := Vnamemsg || Lpad(Substr(Vnumprimacy, 1, 2), 2, '0');
+--extention
+Vnamemsg := Vnamemsg || Pkg_Globalconst.Get_Svalbyname('OZIOUTEXT');
+RETURN Vnamemsg;
+END;
+--Генерирует и возвращает идентификатор файла для отправки в ГО
+FUNCTION Genfileidoutgo(aIdRequest IN INTEGER) RETURN VARCHAR2 IS
+Vidfile VARCHAR2(100);
+Afilial INTEGER;
+Vinn    VARCHAR2(12);
+Vkpp    VARCHAR2(9);
+BEGIN
+SELECT Filial
+INTO   Afilial
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+SELECT TRIM(Unp), TRIM(Kpp)
+INTO   Vinn, Vkpp
+FROM   Office
+WHERE  Filial = Afilial
+AND    Isstruct = 1
+AND    Tpoffice = 0
+AND    Active = 1;
+--ИНН
+Vidfile := Lpad(Substr(Nvl(Vinn, '0'), 1, 10), 10, '0') || '**';
+--КПП
+Vidfile := Vidfile || Lpad(Nvl(Vkpp, '0'), 9, '0');
+--YYYYMMDD
+Vidfile := Vidfile || To_Char(SYSDATE, 'YYYYMMDD');
+--FileNumber
+Vidfile := Vidfile || Lpad(To_Char(Getnextvalfilenumber(Afilial)), 6, '0');
+RETURN Vidfile;
+END;
+--Построение жизненного цикла документа
+FUNCTION Build_Life_Cycle(aIdRequest IN INTEGER,
+ Onlyfirst  IN INTEGER,
+ errMsg     OUT VARCHAR2) RETURN INTEGER IS
+Is_First_Rec             INTEGER;
+Vstate                   INTEGER;
+Idorder_Sprlivereq_First INTEGER;
+Idorder_Operreq_First    INTEGER;
+Vidtyperequest           INTEGER;
+Vidoper                  INTEGER;
+Vidoperfirst             INTEGER;
+Vstatefirst              INTEGER;
+Vtimebegin        DATE;
+Vtimeend          DATE;
+Vtimeout          INTEGER;
+Vtimeoutlimitexec INTEGER;
+errCode INTEGER := 0;
+Tblor Tpoperrequestinserttbl := Tpoperrequestinserttbl();
+Vidopernext      INTEGER;
+Vidoperprev      INTEGER;
+Vidoperalternext INTEGER;
+Vidopertimeout   INTEGER;
+Vidopermaster    INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Nvl(Idtyperequest, 0)
+INTO   Vidtyperequest
+FROM   Dual
+LEFT   JOIN (SELECT Idtyperequest
+FROM   Request
+WHERE  Idrequest = aIdRequest
+AND    Rownum = 1) ON (1 = 1);
+-- vIdTypeRequest=102
+IF Vidtyperequest > 0 THEN
+Is_First_Rec := 1;
+Vidoperfirst := 0;
+FOR Cursprliverequest IN (SELECT *
+ FROM   Sprliverequest
+ WHERE  Idtyperequest = Vidtyperequest
+ ORDER  BY Idorder) LOOP
+FOR Cursproperrequest IN (SELECT *
+ FROM   Sproperrequest
+ WHERE  Idsprliverequest = Cursprliverequest.Idsprliverequest
+ ORDER  BY Idorder) LOOP
+IF Onlyfirst = 1 AND Cursproperrequest.Idtpoper <> Pkg_Constants.Mac_Build_Life_Cycle THEN
+errCode := 1002;
+errMsg  := Substr('System-' || To_Char(errCode) || ': ' || Pkg_Logoper.Geterrormsg(errCode), 1, 1024);
+RETURN errCode;
+END IF;
+IF NOT (Onlyfirst = 0 AND Cursproperrequest.Idtpoper = Pkg_Constants.Mac_Build_Life_Cycle) THEN
+Vstate := Pkg_Constants.State_Wait;
+SELECT Genid_Operrequest.Nextval
+INTO   Vidoper
+FROM   Dual;
+Vtimeout          := Gettimeout(Cursproperrequest.Timeout);
+Vtimeoutlimitexec := Gettimeout(Cursproperrequest.Timeoutlimitexec);
+IF Is_First_Rec = 1 THEN
+Idorder_Sprlivereq_First := Cursprliverequest.Idorder;
+Idorder_Operreq_First    := Cursproperrequest.Idorder;
+Vidoperfirst             := Vidoper;
+Vtimebegin := Gettimestart(Cursproperrequest.Timestartmask);
+Vtimeend   := Vtimebegin + Vtimeoutlimitexec / 86400;
+Is_First_Rec := 0;
+ELSE
+Vtimebegin := NULL;
+Vtimeend   := NULL;
+END IF;
+IF (Cursprliverequest.Idorder = Idorder_Sprlivereq_First) AND (Cursproperrequest.Idorder = Idorder_Operreq_First) THEN
+Vstate := Pkg_Constants.State_Ready;
+END IF;
+Tblor.Extend;
+Tblor(Tblor.Last) := Tpoperrequestinsertrec(Vidoper, --IDOPER
+ Cursproperrequest.Idsproperrequest, --IDSPROPERREQUEST
+ aIdRequest, --IDREQUEST
+ Vstate, --STATE
+ 0, --FLAG
+ 0, --IDSCHEDULER
+ Cursproperrequest.Idsprliverequest, --IDSPRLIVEREQUEST
+ Cursproperrequest.Idtpoper, --IDTPOPER
+ Cursproperrequest.Idorder, --IDORDER
+ Vtimeout, --TIMEOUT
+ Cursproperrequest.Retrycount + 1, --RETRYCOUNT
+ Vtimebegin, --TIMEBEGIN
+ Vtimeend, --TIMEEND
+ 0, --SUMRESTP
+ 0, --SUMRESTF
+ 0, --SUMRESTPEQ
+ 0, --SUMRESTFEQ
+ NULL, --FLAGANSWER
+ NULL, --RESULTOPER
+ Cursproperrequest.Keyresult_Alter, --KEYALTERRESULT
+ Cursproperrequest.Keyresult_Retry, --KEYRESULT_RETRY
+ Cursproperrequest.Keyresult_Isolation, --KEYRESULT_ISOLATION
+ Cursproperrequest.Idnameoper, --sproperrequest.IDNAMEOPER
+ Cursproperrequest.Idnameoper_Prev, --sproperrequest.IDNAMEOPER_PREV
+ Cursproperrequest.Idnameoper_Next, --sproperrequest.IDNAMEOPER_NEXT
+ Cursproperrequest.Idnameoper_Alter_Next, --sproperrequest.IDNAMEOPER_ALTER_NEXT
+ Cursproperrequest.Idtpemail, --IDTPEMAIL
+ Cursproperrequest.Idlivestate, --IDLIVESTATE
+ Cursproperrequest.Idlivestate_Alter, --IDLIVESTATE_ALTER
+ Cursproperrequest.Idnameoper_Timeout, --IDNAMEOPER_TIMEOUT
+ Cursproperrequest.Timestartmask, --TIMESTARTMASK
+ Vtimeoutlimitexec, --TIMEOUTLIMITEXEC
+ Cursproperrequest.Idnameopermaster --sproperrequest.IDNAMEOPERMASTER
+ );
+END IF;
+EXIT WHEN Onlyfirst = 1;
+END LOOP;
+EXIT WHEN Onlyfirst = 1;
+END LOOP;
+FOR Curoperrequest IN (SELECT *
+ FROM   TABLE(Tblor)
+ ORDER  BY Idoper) LOOP
+--IDOPER_NEXT
+IF Curoperrequest.Idnameoper_Next IS NOT NULL THEN
+SELECT Nvl(Idoper, 0)
+INTO   Vidopernext
+FROM   Dual
+LEFT   JOIN (SELECT Idoper
+FROM   TABLE(Tblor)
+WHERE  Idnameoper = Curoperrequest.Idnameoper_Next
+AND    Rownum = 1) ON (1 = 1);
+IF Vidopernext = 0 THEN
+Vidopernext := NULL;
+END IF;
+ELSE
+Vidopernext := NULL;
+END IF;
+--IDOPER_PREV
+IF Curoperrequest.Idnameoper_Prev IS NOT NULL THEN
+SELECT Nvl(Idoper, 0)
+INTO   Vidoperprev
+FROM   Dual
+LEFT   JOIN (SELECT Idoper
+FROM   TABLE(Tblor)
+WHERE  Idnameoper = Curoperrequest.Idnameoper_Prev
+AND    Rownum = 1) ON (1 = 1);
+IF Vidoperprev = 0 THEN
+Vidoperprev := NULL;
+END IF;
+ELSE
+Vidoperprev := NULL;
+END IF;
+--IDOPER_ALTER_NEXT
+IF Curoperrequest.Idnameoper_Alter_Next IS NOT NULL THEN
+SELECT Nvl(Idoper, 0)
+INTO   Vidoperalternext
+FROM   Dual
+LEFT   JOIN (SELECT Idoper
+FROM   TABLE(Tblor)
+WHERE  Idnameoper = Curoperrequest.Idnameoper_Alter_Next
+AND    Rownum = 1) ON (1 = 1);
+IF Vidoperalternext = 0 THEN
+Vidoperalternext := NULL;
+END IF;
+ELSE
+Vidoperalternext := NULL;
+END IF;
+--IDOPER_TIMEOUT
+IF Curoperrequest.Idnameoper_Timeout IS NOT NULL THEN
+SELECT Nvl(Idoper, 0)
+INTO   Vidopertimeout
+FROM   Dual
+LEFT   JOIN (SELECT Idoper
+FROM   TABLE(Tblor)
+WHERE  Idnameoper = Curoperrequest.Idnameoper_Timeout) ON (1 = 1);
+IF Vidopertimeout = 0 THEN
+Vidopertimeout := NULL;
+END IF;
+ELSE
+Vidopertimeout := NULL;
+END IF;
+--IDOPERMASTER
+IF Curoperrequest.Idnameopermaster IS NOT NULL THEN
+SELECT Nvl(Idoper, 0)
+INTO   Vidopermaster
+FROM   Dual
+LEFT   JOIN (SELECT Idoper
+FROM   TABLE(Tblor)
+WHERE  Idnameoper = Curoperrequest.Idnameopermaster
+AND    Rownum = 1) ON (1 = 1);
+IF Vidopermaster = 0 THEN
+Vidopermaster := NULL;
+END IF;
+ELSE
+Vidopermaster := NULL;
+END IF;
+INSERT INTO Operrequest
+(Idoper,
+Idsproperrequest,
+Idrequest,
+State,
+Flag,
+Idscheduler,
+Idsprliverequest,
+Idtpoper,
+Idorder,
+Timeout,
+Retrycount,
+Timebegin,
+Timeend,
+Sumrestp,
+Sumrestf,
+Sumrestpeq,
+Sumrestfeq,
+Flaganswer,
+Idoper_Next,
+Idoper_Prev,
+Idoper_Alter_Next,
+Keyalterresult,
+Resultoper,
+Keyresult_Retry,
+Keyresult_Isolation,
+Idtpemail,
+Idlivestate,
+Idlivestate_Alter,
+Idoper_Timeout,
+Timeoutlimitexec,
+Timestartmask,
+Idopermaster)
+VALUES
+(Curoperrequest.Idoper, --idoper
+Curoperrequest.Idsproperrequest, --idsproperrequest
+Curoperrequest.Idrequest, --idrequest
+Curoperrequest.State, --state
+Curoperrequest.Flag, --flag
+Curoperrequest.Idscheduler, --idscheduler
+Curoperrequest.Idsprliverequest, --idsprliverequest
+Curoperrequest.Idtpoper, --idtpoper
+Curoperrequest.Idorder, --idorder
+Curoperrequest.Timeout, --timeout
+Curoperrequest.Retrycount, --retrycount
+Curoperrequest.Timebegin, --timebegin
+Curoperrequest.Timeend, --timeend
+Curoperrequest.Sumrestp, --sumrestp
+Curoperrequest.Sumrestf, --sumrestf
+Curoperrequest.Sumrestpeq, --sumrestpeq
+Curoperrequest.Sumrestfeq, --sumrestfeq
+Curoperrequest.Flaganswer, --flaganswer
+Vidopernext, --idoper_next
+Vidoperprev, --idoper_prev
+Vidoperalternext, --idoper_alter_next
+Curoperrequest.Keyalterresult, --keyalterresult
+Curoperrequest.Resultoper, --resultoper
+Curoperrequest.Keyresult_Retry, --keyresult_retry
+Curoperrequest.Keyresult_Isolation, --keyresult_isolation
+Curoperrequest.Idtpemail, --IDTPEMAIL
+Curoperrequest.Idlivestate, --IDLIVESTATE
+Curoperrequest.Idlivestate_Alter, --IDLIVESTATE_ALTER
+Vidopertimeout, --IDOPER_TIMEOUT
+Curoperrequest.Timeoutlimitexec, --timeoutlimitexec
+Curoperrequest.Timestartmask, --timestartmask
+Vidopermaster --IDNAMEOPERMASTER
+);
+END LOOP;
+COMMIT;
+IF Vidoperfirst > 0 THEN
+SELECT Nvl(State, 0)
+INTO   Vstatefirst
+FROM   Operrequest
+WHERE  Idoper = Vidoperfirst;
+IF Vstatefirst = Pkg_Constants.State_Finish THEN
+UPDATE Operrequest
+SET    State = -1
+WHERE  Idoper = Vidoperfirst;
+COMMIT;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish
+WHERE  Idoper = Vidoperfirst;
+COMMIT;
+END IF;
+END IF;
+RETURN errCode;
+ELSE
+errCode := 1001;
+errMsg  := Substr('System-' || To_Char(errCode) || ': ' || Pkg_Logoper.Geterrormsg(errCode), 1, 1024);
+RETURN errCode;
+END IF;
+EXCEPTION
+WHEN OTHERS THEN
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+RETURN errCode;
+END Build_Life_Cycle;
+--Макрос - построить жизненный цикл (7777)
+FUNCTION Domac_Build_Life_Cycle(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+BEGIN
+errMsg := NULL;
+errCode := Pkg_Life_Cycle.Build_Life_Cycle(aIdRequest, 0, errMsg);
+IF errCode > 0 THEN
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7777',
+ errMsg);
+vResultOper := 1;
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7777',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - изменить статус документа (101)
+FUNCTION Domac_Changereqstate(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vnextlivestatereq INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Nvl(Idlivestate, 0)
+INTO   Vnextlivestatereq
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+IF Vnextlivestatereq > 0 THEN
+UPDATE Request
+SET    Livestate = Vnextlivestatereq
+WHERE  Idrequest = aIdRequest;
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request, Pkg_Constants.Is_Do_Operrequest, aIdRequest, NULL, 'Код макроса: 101', errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Параметризация счёта ОЗИ ЮЛ (7002)
+FUNCTION Domac_Param_Tpacc_Ozi_Ul(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+vIdAcc   VARCHAR2(24);
+Vidbal1  VARCHAR2(24);
+Vidbal2  VARCHAR2(24);
+Vnidbal1 INTEGER;
+Vnidbal2 INTEGER;
+Vtpacc        INTEGER := 0;
+Vtpclientacc  INTEGER := 7; --по-умолчанию ФЛ
+Vtpmsg        INTEGER; -- по-умолчанию изменение реквизита
+Vfilenamepref VARCHAR2(10);
+Vtabint INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Idacc, Nvl(Tpmsg, 0)
+INTO   vIdAcc, Vtpmsg
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+--Определение TpAcc
+IF vIdAcc IS NOT NULL THEN
+Vidbal1 := Substr(vIdAcc, 1, 3);
+Vidbal2 := Substr(vIdAcc, 1, 5);
+BEGIN
+Vnidbal1 := To_Number(Vidbal1);
+Vnidbal2 := To_Number(Vidbal2);
+EXCEPTION
+WHEN OTHERS THEN
+Vnidbal1 := 0;
+Vnidbal2 := 0;
+END;
+FOR Csprtpacc IN (SELECT *
+FROM   Sprtpacc
+ORDER  BY Idtpacc) LOOP
+IF Instr(Csprtpacc.Accmask, Vidbal2) > 0 THEN
+Vtpacc := Csprtpacc.Idtpacc;
+EXIT;
+END IF;
+END LOOP;
+IF Vtpacc = 0 THEN
+Vtpacc := 5;
+END IF;
+--Определение TpClientAcc
+BEGIN
+SELECT To_Number(t.Column_Value)
+INTO   Vtpclientacc
+FROM   TABLE(Pkg_Web.Getrequestattrvalue(aIdRequest, 'Код лица')) t
+JOIN   Sprtpclientacc s ON (s.Idtpclientacc = To_Number(t.Column_Value))
+WHERE  Rownum = 1;
+EXCEPTION
+WHEN OTHERS THEN
+Vtpclientacc := 7;
+END;
+IF Vtpmsg = 0 THEN
+--Определение TpMsg
+BEGIN
+SELECT To_Number(t.Column_Value)
+INTO   Vtabint
+FROM   TABLE(Pkg_Web.Getrequestattrvalue(aIdRequest, 'Код состояния счета')) t
+WHERE  Rownum = 1;
+EXCEPTION
+WHEN OTHERS THEN
+Vtabint := -1;
+END;
+/*if vTabInt = 1 then
+              vTpMsg := 1; --Открытие
+            elsif vTabInt = 0 then
+              vTpMsg := 2; --Закрытие
+            else
+              begin
+                select to_number(t.column_value)
+                  into vTabInt
+                  from table(PKG_WEB.getRequestAttrValue(aIdRequest, 'Признак изменений')) t
+                  where rownum = 1;
+              exception
+                when others then
+                  vTabInt := -1;
+              end;
+              
+              if vTabInt = 1 then
+                vTpMsg := 4; --Изменение реквизита счета в связи с реорганизацией Банка
+              else
+                vTpMsg := 3; --Изменение реквизита счета
+              end if;
+            end if;*/
+IF Vtabint = 0 THEN
+--ЗАКРЫТИЕ
+IF Vtpclientacc = 7 THEN
+Vtpmsg := 2;
+ELSE
+Vtpmsg := 6;
+END IF;
+ELSIF Vtabint = 1 THEN
+--ОТКРЫТИЕ
+IF Vtpclientacc = 7 THEN
+Vtpmsg := 1;
+ELSE
+Vtpmsg := 5;
+END IF;
+ELSIF Vtabint = 2 THEN
+--ПРОЛОНГАЦИЯ
+IF Vtpclientacc = 7 THEN
+Vtpmsg := 3;
+ELSE
+Vtpmsg := 7;
+END IF;
+ELSIF Vtabint = 3 THEN
+--МИГРАЦИЯ
+IF Vtpclientacc = 7 THEN
+Vtpmsg := 4;
+ELSE
+Vtpmsg := 8;
+END IF;
+END IF;
+END IF;
+--Определение префикса имени файла
+IF Vtpmsg BETWEEN 1 AND 8 THEN
+IF Vtpclientacc BETWEEN 1 AND 6 THEN
+Vfilenamepref := 'SBC';
+ELSIF Vtpclientacc = 7 THEN
+Vfilenamepref := 'SFC';
+ELSE
+Vfilenamepref := 'SKD';
+END IF;
+ELSE
+Vfilenamepref := 'RRR';
+END IF;
+--Запись результатов параметризации в Request
+UPDATE Request
+SET    Tpacc        = Vtpacc,
+Idbal1       = Vnidbal1,
+Idbal2       = Vnidbal2,
+Tpclientacc  = Vtpclientacc,
+Tpmsg        = Vtpmsg,
+Idtpprimacy  = 1,
+Numprimacy   = '00',
+Filenamepref = Vfilenamepref
+WHERE  Idrequest = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+ELSE
+errCode := 3003;
+errMsg  := Substr('System-' || To_Char(errCode) || ': ' || Pkg_Logoper.Geterrormsg(errCode), 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7002',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+END IF;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7002',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Интерпретация к/счёта (2002)
+FUNCTION Domac_Is_Kor_Acc_Ozi(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vtpacc INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Tpacc
+INTO   Vtpacc
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+IF Vtpacc IN (3, 4) THEN
+vResultOper := 4;
+ELSE
+vResultOper := 5;
+END IF;
+UPDATE Operrequest
+SET    Resultoper = vResultOper, State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2002',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Интерпретация сообщения "Открытие счёта" (2004)
+FUNCTION Domac_Is_Open_Acc_Ozi(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vtpmsg INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Tpmsg
+INTO   Vtpmsg
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+IF Vtpmsg = 1 THEN
+vResultOper := 4;
+ELSE
+vResultOper := 5;
+END IF;
+UPDATE Operrequest
+SET    Resultoper = vResultOper, State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2004',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Интерпретация к/счёта НОСТРО (2003)
+FUNCTION Domac_Is_Nostro_Acc_Ozi(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vtpacc INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Tpacc
+INTO   Vtpacc
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+IF Vtpacc IN (4) THEN
+vResultOper := 4;
+ELSE
+vResultOper := 5;
+END IF;
+UPDATE Operrequest
+SET    Resultoper = vResultOper, State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2003',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Генерация уникального номера сообщения ОЗИ (7004)
+FUNCTION Domac_Save_Number_Msg_Acc(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vidnumberacc   INTEGER;
+Vidnumberaccdt INTEGER;
+Vfilial        INTEGER;
+vIdAcc         VARCHAR2(24);
+Vtpmsg         INTEGER;
+Vidoperator    INTEGER;
+Voldacc        INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Idnumberacc, Filial, Idacc, Tpmsg, Idoperator, Idoldacc
+INTO   Vidnumberacc, Vfilial, vIdAcc, Vtpmsg, Vidoperator, Voldacc
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+Vidnumberaccdt := Getnextvalmsgcounter(Vfilial);
+INSERT INTO Numbermsgaccount_Dt
+(Idnumberacc, Idnumberaccdt, Filial, Idacc, Tpmsg, Dtsend, Dtkv, Flagkv, Idoperator, Oldacc, Idrequest)
+VALUES
+(Vidnumberacc, Vidnumberaccdt, Vfilial, vIdAcc, Vtpmsg, NULL, NULL, NULL, Vidoperator, Voldacc, aIdRequest);
+COMMIT;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7004',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Генерация номера, сохранение истории отпр. сообщений (7012)
+FUNCTION Domac_Save_Number_Msg_Acc_Gen(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vidnumberacc        INTEGER;
+Vidnumberaccdt      INTEGER;
+Vfilial             INTEGER;
+vIdAcc              VARCHAR2(24);
+Vtpacc              INTEGER;
+Vidbal1             INTEGER;
+Vidbal2             INTEGER;
+Vtpclientacc        INTEGER;
+Vtpmsg              INTEGER;
+Vidoperator         INTEGER;
+Voldacc             INTEGER;
+Cntnotfinished      INTEGER;
+Currdt              DATE;
+Vtyperequest        INTEGER;
+Vtimestopgeneration DATE;
+Isneedinsertnumbermsgaccount BOOLEAN;
+Iscansend                    BOOLEAN;
+BEGIN
+errMsg := NULL;
+SELECT Filial, Idacc, Tpacc, Idbal1, Idbal2, Tpclientacc, Tpmsg, Idoperator, Idoldacc, Idnumberacc, Idtyperequest
+INTO   Vfilial, vIdAcc, Vtpacc, Vidbal1, Vidbal2, Vtpclientacc, Vtpmsg, Vidoperator, Voldacc, Vidnumberacc, Vtyperequest
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+Iscansend := FALSE;
+IF Vtpmsg = 1 THEN
+Iscansend := TRUE;
+ELSE
+SELECT COUNT(*)
+INTO   Cntnotfinished
+FROM   Numbermsgaccount_Dt
+WHERE  Idnumberacc = Vidnumberacc
+AND    Nvl(Flagkv, 0) = 0;
+IF Cntnotfinished = 0 THEN
+Iscansend := TRUE;
+END IF;
+END IF;
+IF Iscansend THEN
+Currdt := SYSDATE;
+SELECT Gettimestop(Timestopgeneration)
+INTO   Vtimestopgeneration
+FROM   Sprtyperequest
+WHERE  Idtyperequest = Vtyperequest;
+IF Currdt < Vtimestopgeneration THEN
+Isneedinsertnumbermsgaccount := TRUE;
+IF Voldacc IS NOT NULL THEN
+BEGIN
+SELECT Idnumberacc
+INTO   Vidnumberacc
+FROM   Numbermsgaccount_Dt
+WHERE  Idacc = Voldacc
+AND    Rownum = 1;
+Isneedinsertnumbermsgaccount := FALSE;
+EXCEPTION
+WHEN OTHERS THEN
+NULL;
+END;
+END IF;
+IF Isneedinsertnumbermsgaccount THEN
+BEGIN
+SELECT Idnumberacc
+INTO   Vidnumberacc
+FROM   Numbermsgaccount_Dt
+WHERE  Idacc = vIdAcc
+AND    Rownum = 1;
+Isneedinsertnumbermsgaccount := FALSE;
+EXCEPTION
+WHEN OTHERS THEN
+NULL;
+END;
+END IF;
+IF Isneedinsertnumbermsgaccount THEN
+Vidnumberacc := Genid_Numbermsgaccount.Nextval;
+END IF;
+Vidnumberaccdt := Getnextvalmsgcounter(Vfilial);
+IF Isneedinsertnumbermsgaccount THEN
+INSERT INTO Numbermsgaccount
+(Idnumberacc, Filial, Idacc, Tpacc, Idbal1, Idbal2, Tpclientacc)
+VALUES
+(Vidnumberacc, Vfilial, vIdAcc, Vtpacc, Vidbal1, Vidbal2, Vtpclientacc);
+ELSE
+UPDATE Numbermsgaccount
+SET    Idacc = vIdAcc, Filial = Vfilial, Tpacc = Vtpacc, Idbal1 = Vidbal1, Idbal2 = Vidbal2, Tpclientacc = Vtpclientacc
+WHERE  Idnumberacc = Vidnumberacc;
+END IF;
+INSERT INTO Numbermsgaccount_Dt
+(Idnumberacc, Idnumberaccdt, Filial, Idacc, Tpmsg, Dtsend, Dtkv, Flagkv, Idoperator, Oldacc, Idrequest)
+VALUES
+(Vidnumberacc, Vidnumberaccdt, Vfilial, vIdAcc, Vtpmsg, NULL, NULL, NULL, Vidoperator, Voldacc, aIdRequest);
+UPDATE Request
+SET    Idnumberacc = Vidnumberacc, Idnumberaccdt = Vidnumberaccdt
+WHERE  Idrequest = aIdRequest;
+COMMIT;
+ELSE
+Iscansend := FALSE;
+END IF;
+END IF;
+IF Iscansend THEN
+UPDATE Request r
+SET    Livestate =
+(SELECT Decode(Idlivestate, NULL, r.Livestate, 0, r.Livestate, Idlivestate)
+ FROM   Operrequest
+ WHERE  Idoper = aIdOper)
+WHERE  Idrequest = aIdRequest;
+ELSE
+UPDATE Request r
+SET    Livestate =
+(SELECT Decode(Idlivestate_Alter, NULL, r.Livestate, 0, r.Livestate, Idlivestate_Alter)
+ FROM   Operrequest
+ WHERE  Idoper = aIdOper)
+WHERE  Idrequest = aIdRequest;
+vResultOper := 1;
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7012',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Подготовка почтового сообщения (3005)
+FUNCTION Domac_Cr_Email(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vfilial     INTEGER;
+Vidoperator INTEGER;
+Vmailfrom    VARCHAR2(100);
+Vmailto      VARCHAR2(1024);
+Vmailtocopy  VARCHAR2(1024);
+Vthememask   VARCHAR2(100);
+Vmsgbodymask VARCHAR2(1024);
+Vidtpemail INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Filial, Idoperator
+INTO   Vfilial, Vidoperator
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+SELECT Nvl(Idtpemail, 0)
+INTO   Vidtpemail
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+Getemailattr(aIdRequest, Vidtpemail, Vfilial, Vidoperator, Vmailfrom, Vmailto, Vmailtocopy, Vthememask, Vmsgbodymask);
+IF Vmailto IS NULL THEN
+errCode := 3004;
+errMsg  := Substr('System-' || To_Char(errCode) || ': ' || Pkg_Logoper.Geterrormsg(errCode), 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 3005',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END IF;
+INSERT INTO Emailmsg
+(Idmsg, Mailfrom, Mailto, Mailtocopy, Theme, Msgbody, Applink, State, Idrequest, Idoper, Idtpoper, Doper)
+VALUES
+(Genid_Emailmsg.Nextval, --idmsg
+Vmailfrom, --mailfrom
+Vmailto, --mailto
+Vmailtocopy, --mailtocopy
+Vthememask, --theme
+Vmsgbodymask, --msgbody
+NULL, --applink
+1, --state
+aIdRequest, --idrequest
+aIdOper, --idoper
+3005, --idtpoper
+Trunc(SYSDATE + 2 / 24) --doper
+);
+COMMIT;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 3005',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Поиск уникального номера сообщения (7005)
+FUNCTION Domac_Find_Number_Acc(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 5;
+Vfilial      INTEGER;
+Vtpacc       INTEGER;
+Vidbal1      INTEGER;
+Vidbal2      INTEGER;
+Vtpclientacc INTEGER;
+Vtpmsg       INTEGER;
+Vidoperator  INTEGER;
+vIdAcc       VARCHAR2(24);
+Voldacc      VARCHAR2(24);
+Vidnumberacc                 INTEGER;
+Isneedinsertnumbermsgaccount BOOLEAN;
+BEGIN
+errMsg := NULL;
+SELECT Filial, Idacc, Tpacc, Idbal1, Idbal2, Tpclientacc, Tpmsg, Idoperator, Idoldacc
+INTO   Vfilial, vIdAcc, Vtpacc, Vidbal1, Vidbal2, Vtpclientacc, Vtpmsg, Vidoperator, Voldacc
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+Isneedinsertnumbermsgaccount := TRUE;
+IF Voldacc IS NOT NULL THEN
+BEGIN
+SELECT Idnumberacc
+INTO   Vidnumberacc
+FROM   Numbermsgaccount_Dt
+WHERE  Idacc = Voldacc
+AND    Rownum = 1;
+Isneedinsertnumbermsgaccount := FALSE;
+EXCEPTION
+WHEN OTHERS THEN
+NULL;
+END;
+END IF;
+IF Isneedinsertnumbermsgaccount THEN
+BEGIN
+SELECT Idnumberacc
+INTO   Vidnumberacc
+FROM   Numbermsgaccount_Dt
+WHERE  Idacc = vIdAcc
+AND    Rownum = 1;
+Isneedinsertnumbermsgaccount := FALSE;
+EXCEPTION
+WHEN OTHERS THEN
+NULL;
+END;
+END IF;
+IF Isneedinsertnumbermsgaccount THEN
+Vidnumberacc := Genid_Numbermsgaccount.Nextval;
+END IF;
+IF Isneedinsertnumbermsgaccount THEN
+INSERT INTO Numbermsgaccount
+(Idnumberacc, Filial, Idacc, Tpacc, Idbal1, Idbal2, Tpclientacc)
+VALUES
+(Vidnumberacc, Vfilial, vIdAcc, Vtpacc, Vidbal1, Vidbal2, Vtpclientacc);
+ELSE
+UPDATE Numbermsgaccount
+SET    Idacc = vIdAcc, Filial = Vfilial, Tpacc = Vtpacc, Idbal1 = Vidbal1, Idbal2 = Vidbal2, Tpclientacc = Vtpclientacc
+WHERE  Idnumberacc = Vidnumberacc;
+END IF;
+UPDATE Request
+SET    Idnumberacc = Vidnumberacc
+WHERE  Idrequest = aIdRequest;
+COMMIT;
+UPDATE Operrequest
+SET    Resultoper = vResultOper, State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7005',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Сохранение истории сообщения (7006)
+FUNCTION Domac_Save_Acc_History(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+vIdAcc       VARCHAR2(24);
+Vidoldacc    VARCHAR2(24);
+Vidnumberacc INTEGER;
+Vfilial      INTEGER;
+Vtpmsg       INTEGER;
+Vidoperator  INTEGER;
+Vtpclientacc INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Idacc, Idoldacc, Idnumberacc, Filial, Tpmsg, Idoperator, Tpclientacc
+INTO   vIdAcc, Vidoldacc, Vidnumberacc, Vfilial, Vtpmsg, Vidoperator, Vtpclientacc
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+INSERT INTO Numbermsgaccount_Dt
+(Idnumberacc, Filial, Idacc, Tpmsg, Dtsend, Dtkv, Flagkv, Idoperator, Oldacc, Idrequest)
+VALUES
+(Vidnumberacc, Vfilial, vIdAcc, Vtpmsg, NULL, NULL, NULL, Vidoperator, Vidoldacc, aIdRequest);
+IF Vidoldacc IS NOT NULL AND vIdAcc <> Vidoldacc THEN
+UPDATE Numbermsgaccount
+SET    Idacc = vIdAcc
+WHERE  Idnumberacc = Vidnumberacc;
+END IF;
+COMMIT;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7006',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Поиск ранее не обработанного сообщения по счёту (7007)
+FUNCTION Domac_Find_Number_Acc_Not_Fin(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vidnumberacc   INTEGER;
+Cntnotfinished INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Idnumberacc
+INTO   Vidnumberacc
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+SELECT COUNT(*)
+INTO   Cntnotfinished
+FROM   Numbermsgaccount_Dt
+WHERE  Idnumberacc = Vidnumberacc
+AND    Nvl(Flagkv, 0) = 0;
+IF Cntnotfinished > 1 THEN
+vResultOper := 4;
+ELSE
+vResultOper := 5;
+END IF;
+UPDATE Operrequest
+SET    Resultoper = vResultOper, State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7007',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Генерация названия сообщения (7008)
+FUNCTION Domac_Gen_Msg_Name_Ozi(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vnamemsg VARCHAR2(100);
+BEGIN
+errMsg := NULL;
+Vnamemsg := Genfilenameoutgo(aIdRequest);
+UPDATE Request
+SET    Namemsgacc = Vnamemsg
+WHERE  Idrequest = aIdRequest;
+COMMIT;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7008',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Анализ наличия необработанной квитанции (2008)
+FUNCTION Domac_Is_Kvit_Not_Proc(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Cntnotprocessed INTEGER;
+Vidopermaster   INTEGER;
+BEGIN
+errMsg := NULL;
+BEGIN
+SELECT Idopermaster
+INTO   Vidopermaster
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+EXCEPTION
+WHEN OTHERS THEN
+Vidopermaster := 0;
+END;
+IF Vidopermaster > 0 THEN
+SELECT COUNT(r.Idresponse)
+INTO   Cntnotprocessed
+FROM   Response r
+WHERE  r.Idoper = Vidopermaster
+AND    Nvl(r.Processed, 0) = 0
+AND    Nvl(r.Idtpresp, 0) = 1;
+IF Cntnotprocessed = 0 THEN
+vResultOper := 5;
+ELSE
+vResultOper := 4;
+END IF;
+ELSE
+vResultOper := 1;
+errCode     := 3005;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2008',
+ errMsg);
+END IF;
+UPDATE Operrequest
+SET    Resultoper = vResultOper, State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2008',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Анализ наличия необработанной извещений (2009)
+FUNCTION Domac_Is_Notice_Not_Proc(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Cntnotprocessed INTEGER;
+Vidopermaster   INTEGER;
+BEGIN
+errMsg := NULL;
+BEGIN
+SELECT Idopermaster
+INTO   Vidopermaster
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+EXCEPTION
+WHEN OTHERS THEN
+Vidopermaster := 0;
+END;
+IF Vidopermaster > 0 THEN
+SELECT COUNT(r.Idresponse)
+INTO   Cntnotprocessed
+FROM   Response r
+WHERE  r.Idoper = Vidopermaster
+AND    Nvl(r.Processed, 0) = 0
+AND    Nvl(r.Idtpresp, 0) = 2;
+IF Cntnotprocessed = 0 THEN
+vResultOper := 5;
+ELSE
+vResultOper := 4;
+END IF;
+ELSE
+vResultOper := 1;
+errCode     := 3005;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2009',
+ errMsg);
+END IF;
+UPDATE Operrequest
+SET    Resultoper = vResultOper, State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2009',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Поиск в Request номера сообщения - idnumberacc (2001)
+FUNCTION Domac_Find_Number_Acc_Request(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vidnumberaccreq INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Nvl(Idnumberacc, 0)
+INTO   Vidnumberaccreq
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+UPDATE Operrequest
+SET    Resultoper = Decode(Vidnumberaccreq, 0, 5, 4), State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2001',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Интерпретация "квитанция положительная" (2006)
+FUNCTION Domac_Is_Kvit_Ok(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vidopermaster        INTEGER;
+Cntbadresponseresult INTEGER;
+BEGIN
+errMsg := NULL;
+BEGIN
+SELECT Idopermaster
+INTO   Vidopermaster
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+EXCEPTION
+WHEN OTHERS THEN
+Vidopermaster := 0;
+END;
+IF Vidopermaster > 0 THEN
+SELECT COUNT(Idresponse)
+INTO   Cntbadresponseresult
+FROM   Response r
+WHERE  Idoper = Vidopermaster
+AND    Nvl(r.Processed, 0) = 0
+AND    Nvl(r.Idtpresp, 0) = 1
+AND    Nvl(r.Tpresult, 0) <> 4;
+UPDATE Response r
+SET    Processed = 1
+WHERE  Idoper = Vidopermaster
+AND    Nvl(r.Processed, 0) = 0
+AND    Nvl(r.Idtpresp, 0) = 1;
+IF Cntbadresponseresult = 0 THEN
+vResultOper := 4;
+ELSE
+vResultOper := 5;
+END IF;
+ELSE
+vResultOper := 1;
+errCode     := 3005;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2006',
+ errMsg);
+END IF;
+UPDATE Operrequest
+SET    Resultoper = vResultOper, State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2006',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Перевод документа в карантин - не ручная обработка (111)
+FUNCTION Domac_Send_To_Isolation(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode        INTEGER := 0;
+vResultOper    INTEGER := 10;
+Vnextlivestate INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Idlivestate_Alter
+INTO   Vnextlivestate
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+Set_Flag_On_Rorc_By_Idoper(aIdOper, 1, Vnextlivestate);
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request, Pkg_Constants.Is_Do_Operrequest, aIdRequest, NULL, 'Код макроса: 111', errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Перевод документа в карантин - ручная обработка (112)
+FUNCTION Domac_Send_To_Isolation_Hand(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode        INTEGER := 0;
+vResultOper    INTEGER := 10;
+Vnextlivestate INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Idlivestate_Alter
+INTO   Vnextlivestate
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+Set_Flag_On_Rorc_By_Idoper(aIdOper, 2, Vnextlivestate);
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request, Pkg_Constants.Is_Do_Operrequest, aIdRequest, NULL, 'Код макроса: 112', errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Перевод документа в карантин - истек срок получения квитанции (113)
+FUNCTION Domac_Send_To_Isolation_Exp(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode        INTEGER := 0;
+vResultOper    INTEGER := 10;
+Vnextlivestate INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Idlivestate_Alter
+INTO   Vnextlivestate
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+Set_Flag_On_Rorc_By_Idoper(aIdOper, 3, Vnextlivestate);
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request, Pkg_Constants.Is_Do_Operrequest, aIdRequest, NULL, 'Код макроса: 112', errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Макрос - Интерпретация ответа гос.органа "Квитанция" (2005)
+FUNCTION Domac_Is_Kvit(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vidopermaster   INTEGER;
+Cntnotprocessed INTEGER;
+BEGIN
+errMsg := NULL;
+BEGIN
+SELECT Idopermaster
+INTO   Vidopermaster
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+EXCEPTION
+WHEN OTHERS THEN
+Vidopermaster := 0;
+END;
+IF Vidopermaster > 0 THEN
+SELECT COUNT(r.Idresponse)
+INTO   Cntnotprocessed
+FROM   Response r
+WHERE  r.Idoper = Vidopermaster
+AND    Nvl(r.Processed, 0) = 0
+AND    Nvl(r.Idtpresp, 0) = 1;
+IF Cntnotprocessed = 0 THEN
+vResultOper := 5;
+ELSE
+vResultOper := 4;
+END IF;
+ELSE
+vResultOper := 1;
+errCode     := 3005;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2005',
+ errMsg);
+END IF;
+UPDATE Operrequest
+SET    Resultoper = vResultOper, State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2005',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Квитанции нет более 3-х раб.дней (2010)
+FUNCTION Domac_Is_Kvit_No_3_Days(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vtimebegin    DATE;
+Vidopermaster INTEGER;
+BEGIN
+errMsg := NULL;
+BEGIN
+SELECT Idopermaster
+INTO   Vidopermaster
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+EXCEPTION
+WHEN OTHERS THEN
+Vidopermaster := 0;
+END;
+IF Vidopermaster > 0 THEN
+SELECT Timebegin
+INTO   Vtimebegin
+FROM   Operrequest
+WHERE  Idoper = Vidopermaster;
+IF Vtimebegin IS NOT NULL THEN
+SELECT CASE
+WHEN (COUNT(Opdate) - 1) > 3 THEN
+ 4
+ELSE
+ 5
+END
+INTO   vResultOper
+FROM   Calendar
+WHERE  Opdate BETWEEN Trunc(Vtimebegin) AND Trunc(SYSDATE)
+AND    Is_Holiday = 0;
+ELSE
+vResultOper := 1;
+errCode     := 3006;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2010',
+ errMsg);
+END IF;
+ELSE
+vResultOper := 1;
+errCode     := 3005;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2010',
+ errMsg);
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2010',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Квитанции нет более 10-ти раб.дней (2011)
+FUNCTION Domac_Is_Kvit_No_10_Days(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vtimebegin    DATE;
+Vidopermaster INTEGER;
+BEGIN
+BEGIN
+SELECT Idopermaster
+INTO   Vidopermaster
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+EXCEPTION
+WHEN OTHERS THEN
+Vidopermaster := 0;
+END;
+IF Vidopermaster > 0 THEN
+SELECT Timebegin
+INTO   Vtimebegin
+FROM   Operrequest
+WHERE  Idoper = Vidopermaster;
+IF Vtimebegin IS NOT NULL THEN
+SELECT CASE
+WHEN (COUNT(Opdate) - 1) > 10 THEN
+ 4
+ELSE
+ 5
+END
+INTO   vResultOper
+FROM   Calendar
+WHERE  Opdate BETWEEN Trunc(Vtimebegin) AND Trunc(SYSDATE)
+AND    Is_Holiday = 0;
+ELSE
+vResultOper := 1;
+errCode     := 3006;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2011',
+ errMsg);
+END IF;
+ELSE
+vResultOper := 1;
+errCode     := 3005;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2011',
+ errMsg);
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2011',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Макрос - Параметризация счёта ОЗИ ФЛ (7003) !!!
+FUNCTION Domac_Param_Tpacc_Ozi_Fl(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+vIdAcc   VARCHAR2(24);
+Vidbal1  VARCHAR2(24);
+Vidbal2  VARCHAR2(24);
+Vnidbal1 INTEGER;
+Vnidbal2 INTEGER;
+Vtpacc        INTEGER := 0;
+Vtpclientacc  INTEGER := 7; --по-умолчанию ФЛ
+Vtpmsg        INTEGER := 3; -- по-умолчанию изменение реквизита
+Vidtpprimacy  INTEGER := 1; -- по-умолчанию первичное сообщение
+Vnumprimacy   VARCHAR2(2) := '00'; -- по-умолчанию первичное сообщение
+Vfilenamepref VARCHAR2(10);
+Vtabint INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Idacc
+INTO   vIdAcc
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+--Определение TpAcc
+IF vIdAcc IS NOT NULL THEN
+Vidbal1 := Substr(vIdAcc, 1, 3);
+Vidbal2 := Substr(vIdAcc, 1, 5);
+BEGIN
+Vnidbal1 := To_Number(Vidbal1);
+Vnidbal2 := To_Number(Vidbal2);
+EXCEPTION
+WHEN OTHERS THEN
+Vnidbal1 := 0;
+Vnidbal2 := 0;
+END;
+FOR Csprtpacc IN (SELECT *
+FROM   Sprtpacc
+ORDER  BY Idtpacc) LOOP
+IF Instr(Csprtpacc.Accmask, Vidbal2) > 0 THEN
+Vtpacc := Csprtpacc.Idtpacc;
+EXIT;
+END IF;
+END LOOP;
+IF Vtpacc = 0 THEN
+Vtpacc := 1;
+END IF;
+--Определение TpClientAcc
+BEGIN
+SELECT To_Number(t.Column_Value)
+INTO   Vtpclientacc
+FROM   TABLE(Pkg_Web.Getrequestattrvalue(aIdRequest, 'Код лица')) t
+JOIN   Sprtpclientacc s ON (s.Idtpclientacc = To_Number(t.Column_Value))
+WHERE  Rownum = 1;
+EXCEPTION
+WHEN OTHERS THEN
+Vtpclientacc := 7;
+END;
+--Определение TpMsg
+BEGIN
+SELECT To_Number(t.Column_Value)
+INTO   Vtabint
+FROM   TABLE(Pkg_Web.Getrequestattrvalue(aIdRequest, 'Код состояния счета')) t
+WHERE  Rownum = 1;
+EXCEPTION
+WHEN OTHERS THEN
+Vtabint := -1;
+END;
+IF Vtabint = 1 THEN
+Vtpmsg := 1; --Открытие
+ELSIF Vtabint = 0 THEN
+Vtpmsg := 2; --Закрытие
+ELSE
+BEGIN
+SELECT To_Number(t.Column_Value)
+INTO   Vtabint
+FROM   TABLE(Pkg_Web.Getrequestattrvalue(aIdRequest, 'Признак изменений')) t
+WHERE  Rownum = 1;
+EXCEPTION
+WHEN OTHERS THEN
+Vtabint := -1;
+END;
+IF Vtabint = 1 THEN
+Vtpmsg := 4; --Изменение реквизита счета в связи с реорганизацией Банка
+ELSE
+Vtpmsg := 3; --Изменение реквизита счета
+END IF;
+END IF;
+--Определение IdTpPrimacy
+BEGIN
+SELECT To_Number(t.Column_Value)
+INTO   Vidtpprimacy
+FROM   TABLE(Pkg_Web.Getrequestattrvalue(aIdRequest, 'Признак электронного сообщения')) t
+JOIN   Sprtpprimacy s ON (s.Idtpprimacy = To_Number(t.Column_Value))
+WHERE  Rownum = 1;
+EXCEPTION
+WHEN OTHERS THEN
+Vidtpprimacy := 1;
+END;
+--Определение NumberPrimacy
+BEGIN
+SELECT Substr(t.Column_Value, -2, 2)
+INTO   Vnumprimacy
+FROM   TABLE(Pkg_Web.Getrequestattrvalue(aIdRequest, 'Тип сообщения')) t
+WHERE  Rownum = 1;
+EXCEPTION
+WHEN OTHERS THEN
+Vnumprimacy := '00';
+END;
+--Определение префикса имени файла
+IF Vtpmsg BETWEEN 1 AND 4 THEN
+IF Vtpclientacc BETWEEN 1 AND 6 THEN
+Vfilenamepref := 'SBC';
+ELSIF Vtpclientacc = 7 THEN
+Vfilenamepref := 'SFC';
+ELSE
+Vfilenamepref := 'SKD';
+END IF;
+ELSE
+Vfilenamepref := 'RRR';
+END IF;
+--Запись результатов параметризации в Request
+UPDATE Request
+SET    Tpacc        = Vtpacc,
+Idbal1       = Vnidbal1,
+Idbal2       = Vnidbal2,
+Tpclientacc  = Vtpclientacc,
+Tpmsg        = Vtpmsg,
+Idtpprimacy  = Vidtpprimacy,
+Numprimacy   = Vnumprimacy,
+Filenamepref = Vfilenamepref
+WHERE  Idrequest = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+ELSE
+errCode := 3003;
+errMsg  := Substr('System-' || To_Char(errCode) || ': ' || Pkg_Logoper.Geterrormsg(errCode), 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7003',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+END IF;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7003',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Анализ статуса ошибки (2013)
+FUNCTION Domac_Is_Error_State(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 5;
+BEGIN
+errMsg := NULL;
+SELECT Decode(Livestate, 16, 4, 5)
+INTO   vResultOper
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2013',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Изменение префикса сообщения на "повторная отправка" (7013)
+FUNCTION Domac_Chg_Prefix_Resend(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vcntnumberaccdt INTEGER;
+Vnumprimacy     VARCHAR2(10);
+BEGIN
+errMsg := NULL;
+SELECT COUNT(Idnumberaccdt)
+INTO   Vcntnumberaccdt
+FROM   Numbermsgaccount_Dt
+WHERE  Idrequest = aIdRequest;
+Vnumprimacy := To_Char(Vcntnumberaccdt);
+IF Length(Vnumprimacy) > 2 THEN
+Vnumprimacy := Substr(Vnumprimacy, -2);
+END IF;
+UPDATE Request
+SET    Idtpprimacy = 2, Numprimacy = Lpad(Vnumprimacy, 2, '0')
+WHERE  Idrequest = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7013',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Изменение префикса сообщения на "корректирующее" (7014)
+FUNCTION Domac_Chg_Prefix_Correct(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vcntnumberaccdt INTEGER;
+Vnumprimacy     VARCHAR2(10);
+BEGIN
+errMsg := NULL;
+SELECT COUNT(Idnumberaccdt)
+INTO   Vcntnumberaccdt
+FROM   Numbermsgaccount_Dt
+WHERE  Idrequest = aIdRequest;
+Vnumprimacy := To_Char(Vcntnumberaccdt);
+IF Length(Vnumprimacy) > 2 THEN
+Vnumprimacy := Substr(Vnumprimacy, -2);
+END IF;
+UPDATE Request
+SET    Idtpprimacy = 2, Numprimacy = Lpad(Vnumprimacy, 2, '0')
+WHERE  Idrequest = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7014',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Изменение префикса сообщения на "отменяющее" (7015)
+FUNCTION Domac_Chg_Prefix_Cancel(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vcntnumberaccdt INTEGER;
+Vnumprimacy     VARCHAR2(10);
+BEGIN
+errMsg := NULL;
+Vnumprimacy := '77';
+UPDATE Request
+SET    Idtpprimacy = 3, Numprimacy = Lpad(Vnumprimacy, 2, '0')
+WHERE  Idrequest = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7015',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Валидация формата сообщения (5021)
+FUNCTION Domac_Format_Validate(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 4;
+Vcodedoc       INTEGER;
+Vsernumdoc     VARCHAR2(1024);
+Vtpclientacc   INTEGER;
+Vtpmsg         INTEGER;
+Vinn           VARCHAR2(1024);
+Vidtyperequest INTEGER;
+Vkpp           VARCHAR2(1024);
+Vbirthday      DATE;
+Vdatedoc       DATE;
+BEGIN
+errMsg := NULL;
+SELECT Codedoc, Sernumdoc, Inn, Perscode, Kpp, Birthdate, Datedoc
+INTO   Vcodedoc, Vsernumdoc, Vinn, Vtpclientacc, Vkpp, Vbirthday, Vdatedoc
+FROM   Importozi_Dt i
+WHERE  i.Idrequest = aIdRequest;
+/*begin
+        select to_number(t.column_value)
+          into vCodeDoc
+          from table(PKG_WEB.getRequestAttrValue(aIdRequest, 'Код документа удостоверяющего личность')) t
+          where rownum = 1;
+      exception
+        when others then
+          vCodeDoc := 0;
+      end;*/
+---------------------------------------------------------------------
+--Контроль соответствия формату документа
+IF Vcodedoc > 0 THEN
+/*begin
+           select t.column_value
+             into vSerNumDoc
+             from table(PKG_WEB.getRequestAttrValue(aIdRequest, 'Серия и номер документа удостоверяющего личность')) t
+             where rownum = 1;
+         exception
+           when others then
+             vSerNumDoc := NULL;
+         end;*/
+IF Vcodedoc = 1 THEN
+-- R-ББ 999999
+IF Regexp_Substr(Vsernumdoc, '^(I|V|X|L|C)+-[А-Я]{2} [0-9]{6}$') IS NULL AND
+Regexp_Substr(Vsernumdoc, '^(1|У|Х|Л|С)+-[А-Я]{2} [0-9]{6}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 2 THEN
+--990999999
+IF Regexp_Substr(Vsernumdoc, '^[0-9]{2}[0-9]?[0-9]{6}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 3 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 4 THEN
+--ББ 0999999
+IF Regexp_Substr(Vsernumdoc, '^[А-Я]{2} [0-9]?[0-9]{6}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 5 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 6 THEN
+--ББ 999999
+IF Regexp_Substr(Vsernumdoc, '^[А-Я]{2} [0-9]{6}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 7 THEN
+--ББ 0999999
+IF Regexp_Substr(Vsernumdoc, '^[А-Я]{2} [0-9]?[0-9]{6}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 8 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 9 THEN
+--999999999
+IF Regexp_Substr(Vsernumdoc, '^[0-9]{9}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 10 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 11 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 12 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 13 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 14 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 15 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 18 THEN
+--ББ-999 9999999
+IF Regexp_Substr(Vsernumdoc, '^[А-Я]{2}-[0-9]{3} [0-9]{7}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 21 THEN
+--99 99 9999990
+IF Regexp_Substr(Vsernumdoc, '^[0-9]{2} [0-9]{2} [0-9]{6}[0-9]?$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 22 THEN
+--999999999
+IF Regexp_Substr(Vsernumdoc, '^[0-9]{9}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 23 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 24 THEN
+--ББ 9999999
+IF Regexp_Substr(Vsernumdoc, '^[А-Я]{2} [0-9]{7}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 26 THEN
+--ББ 0999999
+IF Regexp_Substr(Vsernumdoc, '^[А-Я]{2} [0-9]?[0-9]{6}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 27 THEN
+--ББ 0999999
+IF Regexp_Substr(Vsernumdoc, '^[А-Я]{2} [0-9]?[0-9]{6}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 60 THEN
+--
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 61 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 62 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 81 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSIF Vcodedoc = 91 THEN
+--SSSSSSSSSSSSSSSSSSSSSSSSS
+IF Length(Vsernumdoc) > 25 OR Regexp_Substr(Vsernumdoc, ' {6,}') IS NOT NULL OR TRIM(Vsernumdoc) IS NULL THEN
+vResultOper := 5;
+errCode     := 5002;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSE
+vResultOper := 5;
+errCode     := 5001;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+END IF;
+---------------------------------------------------------------------Контроль соответствия формату документа
+--Контроль формата ИНН
+/*SELECT TPCLIENTACC, TPMSG, IDTYPEREQUEST
+      INTO vTpClientAcc, vTpMsg, vIdTypeRequest
+      FROM REQUEST
+      WHERE IDREQUEST = aIdRequest;*/
+/*BEGIN
+        SELECT TRIM(RA.VALUEATTR)
+          INTO vINN
+          FROM PARSINGRULES PR
+          JOIN REQUESTATTR RA ON (PR.TAGATTR = RA.TAGATTR AND RA.IDREQUEST = aIdRequest)
+          WHERE PR.IDDOPTYPE1 = vTpMsg
+                AND PR.IDTAG = 'INN'
+                AND PR.IDTYPEREQUEST = vIdTypeRequest;
+      EXCEPTION
+        WHEN OTHERS THEN
+          vINN := null;
+      END;*/
+IF Vinn IS NOT NULL THEN
+IF Vtpclientacc IN (1, 6) THEN
+IF Regexp_Substr(Vinn, '^[0-9]{10}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5003;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+ELSE
+IF Regexp_Substr(Vinn, '^[0-9]{12}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5003;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+END IF;
+END IF;
+--Контроль формата КПП
+/*BEGIN
+        SELECT TRIM(RA.VALUEATTR)
+          INTO vKPP
+          FROM PARSINGRULES PR
+          JOIN REQUESTATTR RA ON (PR.TAGATTR = RA.TAGATTR AND RA.IDREQUEST = aIdRequest)
+          WHERE PR.IDDOPTYPE1 = vTpMsg
+                AND PR.IDTAG = 'KPP'
+                AND PR.IDTYPEREQUEST = vIdTypeRequest;
+      EXCEPTION
+        WHEN OTHERS THEN
+          vKPP := null;
+      END;*/
+IF Vkpp IS NOT NULL THEN
+IF Regexp_Substr(Vkpp, '^[0-9]{9}$') IS NULL THEN
+vResultOper := 5;
+errCode     := 5004;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+END IF;
+--Контроль ввода Даты рождения
+/*BEGIN
+        SELECT TO_DATE(RA.VALUEATTR, 'DD.MM.YYYY')
+          INTO vBirthDay
+          FROM PARSINGRULES PR
+          JOIN REQUESTATTR RA ON (PR.TAGATTR = RA.TAGATTR AND RA.IDREQUEST = aIdRequest)
+          WHERE PR.IDDOPTYPE1 = vTpMsg
+                AND PR.IDTAG = 'BIRTHDATE'
+                AND PR.IDTYPEREQUEST = vIdTypeRequest;
+      EXCEPTION
+        WHEN OTHERS THEN
+          vBirthDay := null;
+      END;*/
+IF Vbirthday IS NOT NULL THEN
+IF To_Number(To_Char(SYSDATE, 'YYYY')) - To_Number(To_Char(Vbirthday, 'YYYY')) > 110 THEN
+vResultOper := 5;
+errCode     := 5005;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+END IF;
+--Контроль ввода Даты выдачи документа
+/*BEGIN
+        SELECT TO_DATE(RA.VALUEATTR, 'DD.MM.YYYY')
+          INTO vDateDoc
+          FROM PARSINGRULES PR
+          JOIN REQUESTATTR RA ON (PR.TAGATTR = RA.TAGATTR AND RA.IDREQUEST = aIdRequest)
+          WHERE PR.IDDOPTYPE1 = vTpMsg
+                AND PR.IDTAG = 'DATEDOC'
+                AND PR.IDTYPEREQUEST = vIdTypeRequest;
+      EXCEPTION
+        WHEN OTHERS THEN
+          vDateDoc := null;
+      END;*/
+IF Vdatedoc IS NOT NULL THEN
+IF Vdatedoc <= Vbirthday AND Vbirthday IS NOT NULL THEN
+vResultOper := 5;
+errCode     := 5006;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+IF To_Number(To_Char(SYSDATE, 'YYYY')) - To_Number(To_Char(Vdatedoc, 'YYYY')) > 100 THEN
+vResultOper := 5;
+errCode     := 5007;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+END IF;
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 5021',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Формирование запроса в смежные Системы (7017)
+FUNCTION Domac_Form_Req_Adj_Sys86(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+vReqDat       Request%ROWTYPE;
+Vattrreqdat   Requestattr%ROWTYPE;
+vIdMsg        Request.Idmsg%TYPE;
+vIdReqout     Requestout.Idrequestout%TYPE;
+Vtagattrout   Parsingrulesout.Tagattrout%TYPE;
+Vidbanksystem Importozi_Dt.Banksystem%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT *
+INTO   vReqDat
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+IF vReqDat.Idtyperequest = 101 THEN
+-- create request out statement
+SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')) Guid
+INTO   vIdMsg
+FROM   Dual;
+vIdReqout := Genid_Requestout.Nextval;
+SELECT Banksystem
+INTO   Vidbanksystem
+FROM   Importozi_Dt
+WHERE  Idrequest = aIdRequest;
+-- TODO ooooo-----------------------------------------------------------------------------------------------
+/*
+         TODO: owner="btsgrenov" created="19.06.2014"
+         text="macros 7017"
+         */
+-------------------------------------------------------------------------------------------------------------
+INSERT INTO Requestout
+(Idrequestout,
+Idmsg,
+Numdoc,
+Dtdoc,
+Dtexecute,
+Filial,
+Idoperator,
+Priority,
+Flag,
+Livestate,
+Operstate,
+Idoper,
+Idsproperrequest,
+Idrequest,
+Flaganswer,
+Filename,
+Fileid,
+Idacc,
+Bik,
+Codebanksystem,
+Idtpoper,
+Isstruct)
+VALUES
+(vIdReqout,
+vIdMsg,
+vReqDat.Numdoc,
+vReqDat.Dtdoc,
+vReqDat.Dtexecute,
+vReqDat.Filial,
+vReqDat.Idoperator,
+vReqDat.Priority,
+NULL,
+NULL,
+NULL, /* flag, livestate, operstate,*/
+aIdOper,
+aIdOperRequestWork,
+aIdRequest,
+0,
+NULL, /*vOutFName,*/
+NULL, /*fileid*/
+vReqDat.Idacc,
+vReqDat.Bik,
+Vidbanksystem,
+Pkg_Constants.Mac_Form_Req_Adj_Sys86,
+1 /*isstruct*/);
+--БИК
+INSERT INTO Requestoutattr
+(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+VALUES
+(vIdReqout, --IDREQUESTOUT
+Genid_Requestattr.Nextval, --IDATTR
+'BIK', --TAGATTR
+3, --TYPEATTR
+vReqDat.Bik, --VALUEATTR
+'БИК', --DESCATTR
+Vattrreqdat.Doper --DOPER
+);
+--ФИЛИАЛ
+INSERT INTO Requestoutattr
+(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+VALUES
+(vIdReqout, --IDREQUESTOUT
+Genid_Requestattr.Nextval, --IDATTR
+'FILIAL', --TAGATTR
+3, --TYPEATTR
+vReqDat.Filial, --VALUEATTR
+'КОД ФИЛИАЛА', --DESCATTR
+Vattrreqdat.Doper --DOPER
+);
+--КОД СИСТЕМЫ
+INSERT INTO Requestoutattr
+(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+VALUES
+(vIdReqout, --IDREQUESTOUT
+Genid_Requestattr.Nextval, --IDATTR
+'BANKSYSTEM', --TAGATTR
+3, --TYPEATTR
+Vidbanksystem, --VALUEATTR
+'КОД СИСТЕМЫ', --DESCATTR
+Vattrreqdat.Doper --DOPER
+);
+--НОМЕР СЧЕТА
+INSERT INTO Requestoutattr
+(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+VALUES
+(vIdReqout, --IDREQUESTOUT
+Genid_Requestattr.Nextval, --IDATTR
+'IDACC', --TAGATTR
+3, --TYPEATTR
+Vidbanksystem, --VALUEATTR
+'НОМЕР СЧЕТА', --DESCATTR
+Vattrreqdat.Doper --DOPER
+);
+COMMIT;
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7017',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Подготовка файла pb2_32 (3009)
+FUNCTION Domac_Prep_f_Pb2_32(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vpbtext        VARCHAR2(1024);
+vReqDat        Request%ROWTYPE;
+vIdRequestOut  Requestout.Idrequestout%TYPE;
+vReceivedFName Requestxml.Filename%TYPE;
+vOutFName      Requestout.Filename%TYPE;
+vIdMsg         Request.Idmsg%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT *
+INTO   vReqDat
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+SELECT Filename
+INTO   vReceivedFName
+FROM   Requestxml
+WHERE  Idrequest = aIdRequest;
+vOutFName := 'pb2_' || vReceivedFName;
+Vpbtext   := vReceivedFName || '###' || Chr(10) || '35;Нельзя арестовывать данный счёт@@@' || Chr(10) || To_Char(SYSDATE, 'YYYY-MM-DD') ||
+'@@@' || Chr(10) || -- date завершения проверки дока
+To_Char(SYSDATE, 'HH24:MI:SS') || '@@@' || Chr(10) || -- time завершения проверки дока
+'===';
+-- create request out statement
+SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')) Guid
+INTO   vIdMsg
+FROM   Dual;
+vIdRequestOut := Genid_Requestout.Nextval;
+INSERT INTO Requestout
+(Idrequestout,
+Idmsg,
+Numdoc,
+Dtdoc,
+Dtexecute,
+Filial,
+Idoperator,
+Priority,
+Flag,
+Livestate,
+Operstate,
+Idoper,
+Idsproperrequest,
+Idrequest,
+Flaganswer,
+Filename,
+Fileid,
+Idacc,
+Bik,
+Codebanksystem,
+Idtpoper,
+Isstruct)
+VALUES
+(vIdRequestOut,
+vIdMsg,
+vReqDat.Numdoc,
+vReqDat.Dtdoc,
+vReqDat.Dtexecute,
+vReqDat.Filial,
+vReqDat.Idoperator,
+vReqDat.Priority,
+vReqDat.Flag,
+NULL,
+NULL, /* livestate, operstate,*/
+aIdOper,
+aIdOperRequestWork,
+aIdRequest,
+NULL, /*flaganswer,*/
+vOutFName,
+NULL, /*fileid*/
+vReqDat.Idacc,
+vReqDat.Bik,
+NULL, /*codebanksysytem*/
+3009,
+100 /*isstruct*/);
+INSERT INTO Requestoutxml
+(Idrequestout, Xmlcrypt, Xmlopen, Namepath, Namefile, Doper, Statefile, Idbatch)
+VALUES
+(vIdRequestOut, NULL, TO_CLOB(vPbText), NULL /*Namepath*/, vOutFName, Trunc(SYSDATE), NULL, NULL);
+UPDATE REQUEST R
+SET    R.NAMEMSGACC = vOutFName
+WHERE  IDREQUEST = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 3009',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Подготовка файла pb2_33 (3010)
+FUNCTION Domac_Prep_f_Pb2_33(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vpbtext        VARCHAR2(1024);
+vReqDat        Request%ROWTYPE;
+vIdRequestOut  Requestout.Idrequestout%TYPE;
+vReceivedFName Requestxml.Filename%TYPE;
+vOutFName      Requestout.Filename%TYPE;
+vIdMsg         Request.Idmsg%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT *
+INTO   vReqDat
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+SELECT Filename
+INTO   vReceivedFName
+FROM   Requestxml
+WHERE  Idrequest = aIdRequest;
+vOutFName := 'pb2_' || vReceivedFName;
+Vpbtext   := vReceivedFName || '###' || Chr(10) || '33;Транзитный счет@@@' || Chr(10) || To_Char(SYSDATE, 'YYYY-MM-DD') || '@@@' || Chr(10) || -- date завершения проверки дока
+To_Char(SYSDATE, 'HH24:MI:SS') || '@@@' || Chr(10) || -- time завершения проверки дока
+'===';
+-- create request out statement
+SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')) Guid
+INTO   vIdMsg
+FROM   Dual;
+vIdRequestOut := Genid_Requestout.Nextval;
+INSERT INTO Requestout
+(Idrequestout,
+Idmsg,
+Numdoc,
+Dtdoc,
+Dtexecute,
+Filial,
+Idoperator,
+Priority,
+Flag,
+Livestate,
+Operstate,
+Idoper,
+Idsproperrequest,
+Idrequest,
+Flaganswer,
+Filename,
+Fileid,
+Idacc,
+Bik,
+Codebanksystem,
+Idtpoper,
+Isstruct)
+VALUES
+(vIdRequestOut,
+vIdMsg,
+vReqDat.Numdoc,
+vReqDat.Dtdoc,
+vReqDat.Dtexecute,
+vReqDat.Filial,
+vReqDat.Idoperator,
+vReqDat.Priority,
+vReqDat.Flag,
+NULL,
+NULL, /* livestate, operstate,*/
+aIdOper,
+aIdOperRequestWork,
+aIdRequest,
+NULL, /*flaganswer,*/
+vOutFName,
+NULL, /*fileid*/
+vReqDat.Idacc,
+vReqDat.Bik,
+NULL, /*codebanksysytem*/
+3010,
+100 /*isstruct*/);
+INSERT INTO Requestoutxml
+(Idrequestout, Xmlcrypt, Xmlopen, Namepath, Namefile, Doper, Statefile, Idbatch)
+VALUES
+(vIdRequestOut, NULL, TO_CLOB(vPbText), NULL /*Namepath*/, vOutFName, Trunc(SYSDATE), NULL, NULL);
+UPDATE REQUEST R
+SET    R.NAMEMSGACC = vOutFName
+WHERE  IDREQUEST = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 3010',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Подготовка файла pb2_35 (счёт закрыт) (3011)
+FUNCTION Domac_Prep_f_Pb2_35_Close_Acc(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode        INTEGER := 0;
+vResultOper    INTEGER := 10;
+Vpbtext        VARCHAR2(1024);
+vReqDat        Request%ROWTYPE;
+vIdRequestOut  Requestout.Idrequestout%TYPE;
+vReceivedFName Requestxml.Filename%TYPE;
+vOutFName      Requestout.Filename%TYPE;
+vIdMsg         Request.Idmsg%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT *
+INTO   vReqDat
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+SELECT Filename
+INTO   vReceivedFName
+FROM   Requestxml
+WHERE  Idrequest = aIdRequest;
+vOutFName := 'pb2_' || vReceivedFName;
+Vpbtext   := vReceivedFName || '###' || Chr(10) || '35;Счет закрыт@@@' || Chr(10) || To_Char(SYSDATE, 'YYYY-MM-DD') || '@@@' || Chr(10) || -- date завершения проверки дока
+To_Char(SYSDATE, 'HH24:MI:SS') || '@@@' || Chr(10) || -- time завершения проверки дока
+'===';
+-- create request out statement
+SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')) Guid
+INTO   vIdMsg
+FROM   Dual;
+vIdRequestOut := Genid_Requestout.Nextval;
+INSERT INTO Requestout
+(Idrequestout,
+Idmsg,
+Numdoc,
+Dtdoc,
+Dtexecute,
+Filial,
+Idoperator,
+Priority,
+Flag,
+Livestate,
+Operstate,
+Idoper,
+Idsproperrequest,
+Idrequest,
+Flaganswer,
+Filename,
+Fileid,
+Idacc,
+Bik,
+Codebanksystem,
+Idtpoper,
+Isstruct)
+VALUES
+(vIdRequestOut,
+vIdMsg,
+vReqDat.Numdoc,
+vReqDat.Dtdoc,
+vReqDat.Dtexecute,
+vReqDat.Filial,
+vReqDat.Idoperator,
+vReqDat.Priority,
+vReqDat.Flag,
+NULL,
+NULL, /* livestate, operstate,*/
+aIdOper,
+aIdOperRequestWork,
+aIdRequest,
+NULL, /*flaganswer,*/
+vOutFName,
+NULL, /*fileid*/
+vReqDat.Idacc,
+vReqDat.Bik,
+NULL, /*codebanksysytem*/
+3011,
+100 /*isstruct*/);
+INSERT INTO Requestoutxml
+(Idrequestout, Xmlcrypt, Xmlopen, Namepath, Namefile, Doper, Statefile, Idbatch)
+VALUES
+(vIdRequestOut, NULL, TO_CLOB(vPbText), NULL /*Namepath*/, vOutFName, Trunc(SYSDATE), NULL, NULL);
+UPDATE REQUEST R
+SET    R.NAMEMSGACC = vOutFName
+WHERE  IDREQUEST = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 3011',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Подготовка файла pb2_35 (нет распоряжения) (3012)
+FUNCTION Domac_Prep_f_Pb2_35_No_Instr(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode        INTEGER := 0;
+vResultOper    INTEGER := 10;
+Vpbtext        VARCHAR2(1024);
+vReqDat        Request%ROWTYPE;
+vIdRequestOut  Requestout.Idrequestout%TYPE;
+vReceivedFName Requestxml.Filename%TYPE;
+vOutFName      Requestout.Filename%TYPE;
+vIdMsg         Request.Idmsg%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT *
+INTO   vReqDat
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+SELECT Filename
+INTO   vReceivedFName
+FROM   Requestxml
+WHERE  Idrequest = aIdRequest;
+vOutFName := 'pb2_' || vReceivedFName;
+Vpbtext   := vReceivedFName || '###' || Chr(10) || '35;нет распоряжения на продажу валюты@@@' || Chr(10) || To_Char(SYSDATE, 'YYYY-MM-DD') ||
+'@@@' || Chr(10) || -- date завершения проверки дока
+To_Char(SYSDATE, 'HH24:MI:SS') || '@@@' || Chr(10) || -- time завершения проверки дока
+'===';
+-- create request out statement
+SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')) Guid
+INTO   vIdMsg
+FROM   Dual;
+vIdRequestOut := Genid_Requestout.Nextval;
+INSERT INTO Requestout
+(Idrequestout,
+Idmsg,
+Numdoc,
+Dtdoc,
+Dtexecute,
+Filial,
+Idoperator,
+Priority,
+Flag,
+Livestate,
+Operstate,
+Idoper,
+Idsproperrequest,
+Idrequest,
+Flaganswer,
+Filename,
+Fileid,
+Idacc,
+Bik,
+Codebanksystem,
+Idtpoper,
+Isstruct)
+VALUES
+(vIdRequestOut,
+vIdMsg,
+vReqDat.Numdoc,
+vReqDat.Dtdoc,
+vReqDat.Dtexecute,
+vReqDat.Filial,
+vReqDat.Idoperator,
+vReqDat.Priority,
+vReqDat.Flag,
+NULL,
+NULL, /* livestate, operstate,*/
+aIdOper,
+aIdOperRequestWork,
+aIdRequest,
+NULL, /*flaganswer,*/
+vOutFName,
+NULL, /*fileid*/
+vReqDat.Idacc,
+vReqDat.Bik,
+NULL, /*codebanksysytem*/
+3012,
+100 /*isstruct*/);
+INSERT INTO Requestoutxml
+(Idrequestout, Xmlcrypt, Xmlopen, Namepath, Namefile, Doper, Statefile, Idbatch)
+VALUES
+(vIdRequestOut, NULL, TO_CLOB(vPbText), NULL /*Namepath*/, vOutFName, Trunc(SYSDATE), NULL, NULL);
+UPDATE REQUEST R
+SET    R.NAMEMSGACC = vOutFName
+WHERE  IDREQUEST = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 3012',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Ожидание ответа от внешних Систем (1007)
+FUNCTION Domac_Wait_Resp_Outer_Sys(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode       INTEGER := 0;
+vResultOper   INTEGER := 10;
+Vidoperreqout Requestout.Idoper%TYPE;
+Vidoperresp   Response.Idoper%TYPE;
+BEGIN
+errMsg      := NULL;
+vResultOper := 4;
+BEGIN
+SELECT Requestout.Idoper, Response.Idoper
+INTO   Vidoperreqout, Vidoperresp
+FROM   Requestout
+INNER  JOIN Response ON Requestout.Idrequest = Response.Idrequest
+ AND    Requestout.Idrequest = aIdRequest
+ AND    Requestout.Idoper = aIdOper;
+EXCEPTION
+WHEN No_Data_Found THEN
+vResultOper := 5;
+END;
+--
+--kod
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 1007',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Анализ "Счёт найден" (2015)
+FUNCTION Domac_An_Acc_Found(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+vIdAcc      Request.Idacc%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT Idacc
+INTO   vIdAcc
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+IF Isrowexists('RESPONSE', 'IDREQUEST', aIdRequest) THEN
+vResultOper := 5; --no
+ELSE
+vResultOper := 4; --yes
+END IF;
+--
+--kod
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2015',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Проверка равенства ИНН в поручении и по счёту (2016)
+FUNCTION Domac_Eq_Inn_In_Ord_On_Acc(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vreqinn     Requestattr.Valueattr%TYPE;
+Vresinn     Responseattr.Valueattr%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT Valueattr
+INTO   Vreqinn
+FROM   Requestattr
+WHERE  Idrequest = aIdRequest
+AND    Tagattr = 'ИНННП';
+SELECT Valueattr
+INTO   Vresinn
+FROM   Responseattr
+INNER  JOIN Response ON Response.Idresponse = Responseattr.Idresponse
+WHERE  Response.Idrequest = aIdRequest
+AND    Responseattr.Tagattr = 'eGetCustomerPartyAccountResponse.eDataArea.eCustomerParty.ePerson.eINNPerson';
+IF Vresinn IS NULL THEN
+SELECT Valueattr
+INTO   Vresinn
+FROM   Responseattr
+INNER  JOIN Response ON Response.Idresponse = Responseattr.Idresponse
+WHERE  Response.Idrequest = aIdRequest
+AND    Responseattr.Tagattr = 'eGetCustomerPartyAccountResponse.eDataArea.eCustomerParty.ePerson.eINNOrganisation';
+END IF;
+IF Vresinn = Vreqinn THEN
+vResultOper := 4;
+ELSE
+vResultOper := 5;
+END IF;
+--kod
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2016',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Анализ "Счёт закрыт" (2017)
+FUNCTION Domac_An_Acc_Closed(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Venddate    Requestattr.Valueattr%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT Valueattr
+INTO   Venddate
+FROM   Responseattr
+INNER  JOIN Response ON Response.Idresponse = Responseattr.Idresponse
+WHERE  Response.Idrequest = aIdRequest
+AND    Responseattr.Tagattr = ' eGetCustomerPartyAccountResponse.eDataArea.eBankAccount.eAccCloseDate';
+IF Venddate IS NULL THEN
+vResultOper := 5;
+ELSE
+vResultOper := 4;
+END IF;
+--
+--kod
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2017',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Анализ "Поручение в валюте" (2018)
+FUNCTION Domac_An_Order_In_Currency(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+vIdAcc      Request.Idacc%TYPE;
+Vcurrency   VARCHAR2(3);
+BEGIN
+errMsg := NULL;
+SELECT Idacc
+INTO   vIdAcc
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+-- take from 5th to 8th symbol
+Vcurrency := Substr(vIdAcc, 5, 3);
+IF Vcurrency = '810' OR Vcurrency = '643' THEN
+vResultOper := 5; --no
+ELSE
+vResultOper := 4; --yes
+END IF;
+--
+--kod
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2018',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Анализ наличия распоряжения на продажу валюты (2019)
+FUNCTION Domac_An_If_Ord_For_Cur_Sell(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode        INTEGER := 0;
+vResultOper    INTEGER := 10;
+Vtagnomporval  Parsingrules.Tagattr%TYPE; -- id 543 'НомПорВал'
+Vtagdataporval Parsingrules.Tagattr%TYPE; -- id 544 'ДатаПорВал'
+Vtagnomvalchet Parsingrules.Tagattr%TYPE; -- id 545 'НомВалСч'
+Vreqattrvalue  Requestattr.Valueattr%TYPE := NULL;
+No_Data EXCEPTION;
+BEGIN
+errMsg      := NULL;
+vResultOper := 4;
+SELECT Tagattr
+INTO   Vtagnomporval
+FROM   Parsingrules
+WHERE  Idparsingrules = 543;
+SELECT Tagattr
+INTO   Vtagdataporval
+FROM   Parsingrules
+WHERE  Idparsingrules = 544;
+SELECT Tagattr
+INTO   Vtagnomvalchet
+FROM   Parsingrules
+WHERE  Idparsingrules = 545;
+BEGIN
+SELECT Valueattr
+INTO   Vreqattrvalue
+FROM   Requestattr
+WHERE  Idrequest = aIdRequest
+AND    Tagattr = Vtagnomporval;
+IF Vreqattrvalue IS NULL THEN
+RAISE No_Data;
+END IF;
+SELECT Valueattr
+INTO   Vreqattrvalue
+FROM   Requestattr
+WHERE  Idrequest = aIdRequest
+AND    Tagattr = Vtagnomporval;
+IF Vreqattrvalue IS NULL THEN
+RAISE No_Data;
+END IF;
+SELECT Valueattr
+INTO   Vreqattrvalue
+FROM   Requestattr
+WHERE  Idrequest = aIdRequest
+AND    Tagattr = Vtagnomporval;
+IF Vreqattrvalue IS NULL THEN
+RAISE No_Data;
+END IF;
+EXCEPTION
+WHEN No_Data_Found OR No_Data THEN
+vResultOper := 5;
+END;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2019',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Присвоение входящего номера документа ИП (7016)
+FUNCTION Domac_Assignindocnum(a_Idoperrequestwork IN INTEGER,
+a_Idoper            IN INTEGER,
+a_Idrequest         IN INTEGER,
+errMsg              OUT VARCHAR2)
+RETURN INTEGER IS
+errCode      INTEGER := 0;
+v_Resultoper INTEGER := 10;
+v_Idtyperequest INTEGER;
+v_Filial        INTEGER;
+v_Tpmsg         INTEGER;
+v_Tpofnum       INTEGER;
+v_Sprnumid      INTEGER;
+v_Cntnum        INTEGER := NULL;
+v_Snummask      VARCHAR2(200);
+v_Snum          VARCHAR2(200);
+v_Date          DATE := Trunc(SYSDATE);
+v_Mm            VARCHAR2(2);
+v_Yy            VARCHAR(2);
+v_Idnumjournal  INTEGER;
+BEGIN
+errMsg := NULL;
+v_Mm   := To_Char(v_Date, 'MM');
+v_Yy   := To_Char(v_Date, 'YY');
+SELECT Idtyperequest, Tpmsg, Filial
+INTO   v_Idtyperequest, v_Tpmsg, v_Filial
+FROM   Request
+WHERE  Idrequest = a_Idrequest;
+SELECT Idnum, Tpnum, Masknum
+INTO   v_Sprnumid, v_Tpofnum, v_Snummask
+FROM   Sprnumjournal
+WHERE  Idtyperequest = v_Idtyperequest
+AND    Idtpmsg = v_Tpmsg
+AND    Filial = v_Filial;
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ a_Idrequest,
+ NULL,
+ 'v_Idtyperequest ' || v_Idtyperequest || ' v_Tpmsg ' || v_Tpmsg || ' v_Filial ' || v_Filial || ' v_Sprnumid ' ||
+ v_Sprnumid || ' v_Tpofnum ' || v_Tpofnum || ' v_Snummask ' || v_Snummask,
+ errMsg);
+-- check if exists 
+IF Isrowexistsiddate('NUMJOURNAL', 'IDNUM', v_Sprnumid, v_Tpofnum, v_Date) THEN
+CASE v_Tpofnum
+-- day + id
+WHEN 1 THEN
+SELECT Idnumjournal
+INTO   v_Idnumjournal
+FROM   Numjournal
+WHERE  Idnum = v_Sprnumid
+AND    Dtnum = v_Date;
+-- month + id
+WHEN 2 THEN
+SELECT Idnumjournal
+INTO   v_Idnumjournal
+FROM   Numjournal
+WHERE  Idnum = v_Sprnumid
+AND    Mm = v_Mm;
+WHEN 3 THEN
+SELECT Cnt_Num
+INTO   v_Idnumjournal
+FROM   Numjournal
+WHERE  Idnum = v_Sprnumid
+AND    Yy = v_Yy;
+ELSE
+NULL; --ERROR
+END CASE;
+--increment
+SELECT Cnt_Num
+INTO   v_Cntnum
+FROM   Numjournal
+WHERE  Idnumjournal = v_Idnumjournal;
+v_Cntnum := v_Cntnum + 1;
+-- generate new vSnum
+v_Snum := Getmaskednum(v_Cntnum, v_Snummask, v_Date);
+-- Update NumJournal
+UPDATE Numjournal
+SET    Cnt_Num = v_Cntnum, Snum = v_Snum
+WHERE  Idnumjournal = v_Idnumjournal;
+-- create new value
+ELSE
+-- create new num
+SELECT Beginnum
+INTO   v_Cntnum
+FROM   Sprnumjournal
+WHERE  Idnum = v_Sprnumid;
+v_Snum := Getmaskednum(v_Cntnum, v_Snummask, v_Date);
+-- Update NumJournal
+INSERT INTO Numjournal
+(Idnum, Idnumjournal, Dtnum, Mm, Yy, Cnt_Num, Snum)
+VALUES
+(v_Sprnumid, Genid_Numjournal.Nextval, v_Date, v_Mm, v_Yy, v_Cntnum, v_Snum);
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = v_Resultoper
+WHERE  Idoper = a_Idoper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = a_Idoperrequestwork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+/*WHEN No_Data_Found THEN
+      errCode := SQLCODE;
+      errMsg  := Substr(SQLERRM, 1, 1024);
+      
+      Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+                                Pkg_Constants.Is_Do_Operrequest,
+                                a_Idrequest,
+                                NULL,
+                                'debug: ' ||
+                                Dbms_Utility.Format_Error_Stack,
+                                errMsg);
+      
+      v_Resultoper := 1;
+      UPDATE Operrequest
+      SET    State      = Pkg_Constants.State_Finish,
+             Resultoper = v_Resultoper
+      WHERE  Idoper = a_Idoper;
+      
+      UPDATE Operrequestwork
+      SET    Opstate = 10
+      WHERE  Idoperrequestwork = a_Idoperrequestwork;
+      COMMIT;
+      
+      RETURN errCode;*/
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ a_Idrequest,
+ NULL,
+ 'Код макроса: 7016',
+ errMsg);
+v_Resultoper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = v_Resultoper
+WHERE  Idoper = a_Idoper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = a_Idoperrequestwork;
+COMMIT;
+RETURN errCode;
+END;
+-- Подготовка файла pb1_10 (3006)
+FUNCTION Domac_Prep_f_Pb1_10(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode        INTEGER := 0;
+vResultOper    INTEGER := 10;
+Vpbtext        VARCHAR2(1024);
+vReqDat        Request%ROWTYPE;
+vReceivedFName Requestxml.Filename%TYPE;
+vOutFName      Requestout.Filename%TYPE;
+vIdMsg         Request.Idmsg%TYPE;
+vIdRequestOut  INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT *
+INTO   vReqDat
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+SELECT Filename
+INTO   vReceivedFName
+FROM   Requestxml
+WHERE  Idrequest = aIdRequest;
+vOutFName := 'pb1_' || vReceivedFName;
+Vpbtext   := vReceivedFName || '###' || Chr(10) || '10@@@' || Chr(10) || To_Char(SYSDATE, 'YYYY-MM-DD') || '@@@' || Chr(10) || -- date завершения проверки дока
+To_Char(SYSDATE, 'HH24:MI:SS') || '@@@' || Chr(10) || -- time завершения проверки дока
+'===';
+-- create request out statement
+SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')) Guid
+INTO   vIdMsg
+FROM   Dual;
+vIdRequestOut := Genid_Requestout.Nextval;
+INSERT INTO Requestout
+(Idrequestout,
+Idmsg,
+Numdoc,
+Dtdoc,
+Dtexecute,
+Filial,
+Idoperator,
+Priority,
+Flag,
+Livestate,
+Operstate,
+Idoper,
+Idsproperrequest,
+Idrequest,
+Flaganswer,
+Filename,
+Fileid,
+Idacc,
+Bik,
+Codebanksystem,
+Idtpoper,
+Isstruct)
+VALUES
+(vIdRequestOut,
+vIdMsg,
+vReqDat.Numdoc,
+vReqDat.Dtdoc,
+vReqDat.Dtexecute,
+vReqDat.Filial,
+vReqDat.Idoperator,
+vReqDat.Priority,
+vReqDat.Flag,
+NULL,
+NULL, /* livestate, operstate,*/
+aIdOper,
+aIdOperRequestWork,
+aIdRequest,
+NULL, /*flaganswer,*/
+vOutFName,
+NULL, /*fileid*/
+vReqDat.Idacc,
+vReqDat.Bik,
+NULL, /*codebanksysytem*/
+3006,
+100 /*isstruct*/);
+-- todo
+INSERT INTO Requestoutxml
+(Idrequestout, Xmlcrypt, Xmlopen, Namepath, Namefile, Doper, Statefile, Idbatch)
+VALUES
+(vIdRequestOut, NULL, TO_CLOB(vPbText), NULL /*Namepath*/, vOutFName, Trunc(SYSDATE), NULL, NULL);
+UPDATE REQUEST R
+SET    R.NAMEMSGACC = vOutFName
+WHERE  IDREQUEST = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 3006',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Анализ транзитного счёта (2014)
+FUNCTION Domac_An_Trans_Acc(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+vIdAcc      Request.Idacc%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT Idacc
+INTO   vIdAcc
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+/*
+      TODO: owner="btsgrenov" created="19.06.2014" closed="20.06.2014"
+      text="транзитный"
+      */
+IF substr(vIdAcc, 14, 1) = '1' THEN
+-- getnametpacc(Accnum => vIdAcc) = 'Расчетный' AND 
+vResultOper := 4;
+ELSE
+vResultOper := 5;
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2014',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Анализ своего БИК (2020)
+FUNCTION Domac_An_Bik(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vfilial Request.Filial%TYPE;
+Vbik    Request.Bik%TYPE;
+Vmfo    Office.Mfo%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT Filial, Bik
+INTO   Vfilial, Vbik
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+SELECT Mfo
+INTO   Vmfo
+FROM   Office
+WHERE  Filial = Vfilial
+AND    Office.Tpoffice = 0
+AND    Office.Isstruct = 1
+AND    Office.Active = 1;
+--kod
+IF Vbik = Vmfo THEN
+vResultOper := 4;
+ELSE
+vResultOper := 5;
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2020',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Подготовка файла pb2_35 (транзитный счёт) (3007)
+FUNCTION Domac_Prep_f_Pb2_35_Trans(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode        INTEGER := 0;
+vResultOper    INTEGER := 10;
+Vpbtext        VARCHAR2(1024);
+vReqDat        Request%ROWTYPE;
+vReceivedFName Requestxml.Filename%TYPE;
+vOutFName      Requestout.Filename%TYPE;
+vIdMsg         Request.Idmsg%TYPE;
+vIdRequestOut  requestout.idrequestout%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT *
+INTO   vReqDat
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+SELECT Filename
+INTO   vReceivedFName
+FROM   Requestxml
+WHERE  Idrequest = aIdRequest;
+vOutFName := 'pb2_' || vReceivedFName;
+Vpbtext   := vReceivedFName || '###' || Chr(10) || '35;Транзитный счет@@@' || Chr(10) || To_Char(SYSDATE, 'YYYY-MM-DD') || '@@@' || Chr(10) || -- date завершения проверки дока
+To_Char(SYSDATE, 'HH24:MI:SS') || '@@@' || Chr(10) || -- time завершения проверки дока
+'===';
+-- create request out statement
+SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')) Guid
+INTO   vIdMsg
+FROM   Dual;
+vIdRequestOut := Genid_Requestout.Nextval;
+INSERT INTO Requestout
+(Idrequestout,
+Idmsg,
+Numdoc,
+Dtdoc,
+Dtexecute,
+Filial,
+Idoperator,
+Priority,
+Flag,
+Livestate,
+Operstate,
+Idoper,
+Idsproperrequest,
+Idrequest,
+Flaganswer,
+Filename,
+Fileid,
+Idacc,
+Bik,
+Codebanksystem,
+Idtpoper,
+Isstruct)
+VALUES
+(vIdRequestOut,
+vIdMsg,
+vReqDat.Numdoc,
+vReqDat.Dtdoc,
+vReqDat.Dtexecute,
+vReqDat.Filial,
+vReqDat.Idoperator,
+vReqDat.Priority,
+vReqDat.Flag,
+NULL,
+NULL, /* livestate, operstate,*/
+aIdOper,
+aIdOperRequestWork,
+aIdRequest,
+NULL, /*flaganswer,*/
+vOutFName,
+NULL, /*fileid*/
+vReqDat.Idacc,
+vReqDat.Bik,
+NULL, /*codebanksysytem*/
+3007,
+100 /*isstruct*/);
+INSERT INTO Requestoutxml
+(Idrequestout, Xmlcrypt, Xmlopen, Namepath, Namefile, Doper, Statefile, Idbatch)
+VALUES
+(vIdRequestOut, NULL, TO_CLOB(vPbText), NULL /*Namepath*/, vOutFName, Trunc(SYSDATE), NULL, NULL);
+UPDATE REQUEST R
+SET    R.NAMEMSGACC = vOutFName
+WHERE  IDREQUEST = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 3007',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--Подготовка файла pb2_31 (3008)
+FUNCTION Domac_Prep_f_Pb2_31(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode        INTEGER := 0;
+vResultOper    INTEGER := 10;
+Vpbtext        VARCHAR2(1024);
+vReqDat        Request%ROWTYPE;
+vReceivedFName Requestxml.Filename%TYPE;
+vOutFName      Requestout.Filename%TYPE;
+vIdMsg         Request.Idmsg%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT *
+INTO   vReqDat
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+SELECT Filename
+INTO   vReceivedFName
+FROM   Requestxml
+WHERE  Idrequest = aIdRequest;
+vOutFName := 'pb2_' || vReceivedFName;
+Vpbtext   := vReceivedFName || '###' || Chr(10) || '31;@@@' || Chr(10) || To_Char(SYSDATE, 'YYYY-MM-DD') || '@@@' || Chr(10) || -- date завершения проверки дока
+To_Char(SYSDATE, 'HH24:MI:SS') || '@@@' || Chr(10) || -- time завершения проверки дока
+'===';
+-- create request out statement
+SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')) Guid
+INTO   vIdMsg
+FROM   Dual;
+INSERT INTO Requestout
+(Idrequestout,
+Idmsg,
+Numdoc,
+Dtdoc,
+Dtexecute,
+Filial,
+Idoperator,
+Priority,
+Flag,
+Livestate,
+Operstate,
+Idoper,
+Idsproperrequest,
+Idrequest,
+Flaganswer,
+Filename,
+Fileid,
+Idacc,
+Bik,
+Codebanksystem,
+Idtpoper,
+Isstruct)
+VALUES
+(Genid_Requestout.Nextval,
+vIdMsg,
+vReqDat.Numdoc,
+vReqDat.Dtdoc,
+vReqDat.Dtexecute,
+vReqDat.Filial,
+vReqDat.Idoperator,
+vReqDat.Priority,
+vReqDat.Flag,
+NULL,
+NULL, /* livestate, operstate,*/
+aIdOper,
+aIdOperRequestWork,
+aIdRequest,
+NULL, /*flaganswer,*/
+vOutFName,
+NULL, /*fileid*/
+vReqDat.Idacc,
+vReqDat.Bik,
+NULL, /*codebanksysytem*/
+3008,
+100 /*isstruct*/);
+INSERT INTO Requestoutxml
+(Idrequestout, Xmlcrypt, Xmlopen, Namepath, Namefile, Doper, Statefile, Idbatch)
+VALUES
+(Genid_Requestout.Currval, NULL, Vpbtext, 'c://filepath', vOutFName, Trunc(SYSDATE), NULL, NULL);
+--kod
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 3008',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Макрос - Анализ наличия всех квитанций (2012)
+FUNCTION Domac_Is_All_Kvit(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Cntkvitfact INTEGER;
+BEGIN
+errMsg := NULL;
+SELECT Nvl(Flagkv, 0)
+INTO   Cntkvitfact
+FROM   Numbermsgaccount_Dt
+WHERE  Idrequest = aIdRequest;
+SELECT CASE
+WHEN Cntkvitfact < s.Cntfowaitingfor THEN
+ 5
+ELSE
+ 4
+END
+INTO   vResultOper
+FROM   Request r
+LEFT   JOIN Sprtpacc s ON (s.Idtpacc = r.Tpacc)
+WHERE  r.Idrequest = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2012',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Формирование ответа в гос. орган (сведения об остатках) от БС86 (3014) BOS
+FUNCTION doMAC_PREP_BOS(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+-- Declaration
+Errcode       INTEGER := 0;
+v_Result_Oper INTEGER := 10;
+-- File Body Vars
+v_File_Body          VARCHAR2(4096);
+v_Eob                VARCHAR2(3) := '###';
+v_Eofr               VARCHAR2(3) := '@@@';
+v_Eof                VARCHAR2(3) := '===';
+v_Next_Line          CHAR := Chr(10);
+v_Key_Value_Delimetr VARCHAR2(1) := ':';
+-- Creating types to process data from 
+TYPE t_Acc_Data IS RECORD(
+responseID   Response.Idresponse%TYPE,
+accNum       RESPONSEATTR.VALUEATTR%TYPE,
+accType      RESPONSEATTR.VALUEATTR%TYPE,
+accCurr      RESPONSEATTR.VALUEATTR%TYPE,
+accRemainder RESPONSEATTR.VALUEATTR%TYPE,
+erCode       NUMBER,
+erMsg        RESPONSEATTR.VALUEATTR%TYPE);
+TYPE t_Table_Acc_Data IS TABLE OF t_Acc_Data INDEX BY VARCHAR2(50);
+-- SLUZHEBNAYA_PART_VARS_____________________________________________________________
+v_File_Id VARCHAR2(200);
+v_Infotype CONSTANT VARCHAR2(7) := 'ОСТАТКИ';
+-- programm version
+v_Sender_Phone Sprtpmsg_Filial.Senderphone%TYPE; -- Телефон отправителя
+v_Sender_Dolg  Sprtpmsg_Filial.Senderdolg%TYPE; -- Должность отправителя
+v_Sender_FIO   Sprtpmsg_Filial.Senderfio%TYPE; -- FIO sender
+v_Number_Of_Docs CONSTANT INTEGER := 1;
+v_Format_Version CONSTANT VARCHAR2(7) := '2.01';
+-- INFORMATION_PART_VARS_____________________________________________________________
+v_Guid VARCHAR2(50);
+-- nomer spravki
+v_Bank_Inn          Requestattr.Valueattr%TYPE; -- ИННКО
+v_Bank_Kpp          Requestattr.Valueattr%TYPE; -- КППКО
+v_Bank_Bik          Requestattr.Valueattr%TYPE; -- БИК
+v_Bank_Name         Requestattr.Valueattr%TYPE; -- НаиКО
+v_Filial_Num        Requestattr.Valueattr%TYPE; -- НомФ
+v_Request_Num       Requestattr.Valueattr%TYPE; -- НомЗапр
+v_Request_Date      Requestattr.Valueattr%TYPE; -- ДатаЗапр
+v_No_Code           Requestattr.Valueattr%TYPE; -- КодНО
+v_Inn_Np            Requestattr.Valueattr%TYPE; -- ИНННП
+v_Kpp_Np            Requestattr.Valueattr%TYPE; -- КППНП
+v_Organisation_Name Requestattr.Valueattr%TYPE; -- НаимНП
+v_Fio_Ip            Requestattr.Valueattr%TYPE; -- ФИОИП
+v_PrB_Dolg          Sprtpmsg_Filial.Senderdolg%TYPE;
+v_PrB_FIO           Sprtpmsg_Filial.Senderdolg%TYPE;
+v_Balance_Info_Date Request.DTexecute%TYPE; -- Дата закрытия исполнения респонса -- convertion to format DD.MM.YYYY (YES/NOT YET): yes
+v_Date              DATE := SYSDATE; -- convertion to format DD.MM.YYYY (YES/NOT YET): yes
+-- Request_vars________________________________________________________________________
+v_Request_Data Request%ROWTYPE;
+v_Request_Attr Requestattr%ROWTYPE;
+CURSOR Cur_Request_Attrs IS
+SELECT *
+FROM   Requestattr
+WHERE  Idrequest = aIdRequest;
+-- Disambiguating_GO_VAR
+isGO BOOLEAN := FALSE; -- default, in code set to true if needed
+-- Response_finder, cursor_____________________________________________________________
+v_Response_Id Response.Idresponse%TYPE;
+vIdTpOPER     INTEGER(5);
+CURSOR Cur_Response_ID IS
+SELECT IdResponse
+FROM   Response
+WHERE  idrequestout IN (SELECT idRequestOut
+FROM   Operrequest
+WHERE  Idrequest = aIdRequest
+AND    Idtpoper = vIdTpOPER); -- Look up sprtpoper for more info
+-- Response_data_vars__________________________________________________________________
+tblRespDt   t_Table_Acc_Data;
+v_Resp_Attr Responseattr%ROWTYPE;
+indexR      BINARY_INTEGER; -- counter used to read found account details
+CURSOR Cur_Response_Attrs IS
+SELECT *
+FROM   Responseattr
+WHERE  Idresponse = v_Response_Id
+AND    stateattr = 0; -- state attr indicates that acc is valid
+-- Exceptions___________________________________________________________________________
+ex_invalidTpMsg EXCEPTION;
+PRAGMA EXCEPTION_INIT(ex_invalidTpMsg, -20001);
+BEGIN
+--______________________________________________________________________________________________________________________________________________________________________BEGINn
+errMsg := NULL;
+-- Collecting Request Data_______________________________________________
+SELECT *
+INTO   v_Request_Data
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+-- getting all request attrs data
+OPEN Cur_Request_Attrs;
+LOOP
+FETCH Cur_Request_Attrs
+INTO v_Request_Attr;
+EXIT WHEN Cur_Request_Attrs%NOTFOUND;
+CASE Upper(v_Request_Attr.Tagattr)
+WHEN Upper('ИННКО') THEN
+v_Bank_Inn := v_Request_Attr.Valueattr;
+WHEN Upper('КППКО') THEN
+v_Bank_Kpp := v_Request_Attr.Valueattr;
+WHEN Upper('БИК') THEN
+v_Bank_Bik := v_Request_Attr.Valueattr;
+WHEN Upper('НаиКО') THEN
+v_Bank_Name := v_Request_Attr.Valueattr;
+WHEN Upper('НомФ') THEN
+v_Filial_Num := v_Request_Attr.Valueattr;
+WHEN Upper('НомЗапр') THEN
+v_Request_Num := v_Request_Attr.Valueattr;
+WHEN Upper('ДатаЗапр') THEN
+v_Request_Date := v_Request_Attr.Valueattr;
+WHEN Upper('КодНО') THEN
+v_No_Code := v_Request_Attr.Valueattr;
+WHEN Upper('ИНННП') THEN
+v_Inn_Np := v_Request_Attr.Valueattr;
+WHEN Upper('КППНП') THEN
+v_Kpp_Np := v_Request_Attr.Valueattr;
+WHEN Upper('НаимНП') THEN
+v_Organisation_Name := v_Request_Attr.Valueattr;
+WHEN Upper('ФИОИП') THEN
+v_Fio_Ip := v_Request_Attr.Valueattr;
+ELSE
+-- unneded data from other fields
+NULL;
+END CASE;
+END LOOP;
+CLOSE Cur_Request_Attrs;
+-- Decide whether по счетам или (по клиенту или по по счетам в го)____and_getting_responseattrs_______________________________________________________
+IF v_Request_Data.Idoffice = 1 THEN
+-- from spr, idoffice 1 means GO
+isGO := TRUE;
+END IF;
+IF v_Request_Data.Tpmsg = 19 AND NOT isGO THEN
+-- po schetam filial
+vIdTpOPER := 7017;
+ELSIF (v_Request_Data.Tpmsg = 19 AND isGO) OR (v_Request_Data.Tpmsg = 17) THEN
+-- po schetam GO ili po klienty
+vIdTpOPER := 7019;
+NULL;
+ELSE
+NULL; --raise_application_error(-20001, 'This error occured as no proper messge types were found in tables');
+END IF;
+-- RETRIEVING ALL DATA
+OPEN Cur_Response_ID;
+LOOP
+FETCH Cur_Response_ID
+INTO v_Response_Id;
+EXIT WHEN Cur_Response_ID%NOTFOUND;
+OPEN Cur_Response_Attrs;
+LOOP
+FETCH Cur_Response_Attrs
+INTO v_Resp_Attr;
+EXIT WHEN Cur_Response_Attrs%NOTFOUND;
+CASE
+WHEN Instr(Upper(v_Resp_Attr.Tagattr), 'BANKACCOUNTID') > 0 THEN
+tblRespDt('v_Response_Id' || v_Resp_Attr.Stateattr).accnum := v_Resp_Attr.Valueattr;
+tblRespDt('v_Response_Id' || v_Resp_Attr.Stateattr).accType := getNameTpAcc(v_Resp_Attr.Valueattr);
+WHEN Instr(Upper(v_Resp_Attr.Tagattr), 'CURRENCY') > 0 THEN
+tblRespDt('v_Response_Id' || v_Resp_Attr.Stateattr).accCurr := v_Resp_Attr.Valueattr;
+WHEN Instr(Upper(v_Resp_Attr.Tagattr), 'BALANCEAMOUNT') > 0 THEN
+tblRespDt('v_Response_Id' || v_Resp_Attr.Stateattr).accRemainder := v_Resp_Attr.Valueattr;
+WHEN Instr(Upper(v_Resp_Attr.Tagattr), 'ERRORCODE') > 0 THEN
+tblRespDt('v_Response_Id' || v_Resp_Attr.Stateattr).erCode := v_Resp_Attr.Valueattr;
+WHEN Instr(Upper(v_Resp_Attr.Tagattr), 'ERRORMESSAGE') > 0 THEN
+tblRespDt('v_Response_Id' || v_Resp_Attr.Stateattr).erMsg := v_Resp_Attr.Valueattr;
+ELSE
+-- unneeded data from other fields
+NULL;
+END CASE;
+END LOOP;
+CLOSE Cur_Response_Attrs;
+END LOOP;
+CLOSE Cur_Response_ID;
+-- getting sender data_______________________________________________________________________________________________
+SELECT SenderPhone, SenderDolg, SenderFIO, RepresentFIO, RepresentDolg
+INTO   v_Sender_Phone, v_Sender_Dolg, v_Sender_FIO, v_PrB_FIO, v_PrB_Dolg
+FROM   Sprtpmsg_Filial
+WHERE  Filial = v_Request_Data.Filial
+AND    Idtpmsg = v_Request_Data.Tpmsg;
+-- generating guid_____________________________________________________________________________________________
+SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')) Guid
+INTO   v_Guid
+FROM   Dual;
+-- generating file id
+v_File_Id := v_Inn_Np || '**' || v_Kpp_Np || To_Char(v_Date, 'YYYYMMDD') || v_Guid;
+v_File_Body :=   -- output file format BOS 
+'ИдФайл' || v_Key_Value_Delimetr || v_File_Id || v_Next_Line || -- Идентификатор файла <идентификатор отправителя> <год> <месяц> <день> <номер файла>
+'ТипИнф' || v_Key_Value_Delimetr || v_Infotype || v_Next_Line || -- Тип информации 
+'ВерсПрог' || v_Key_Value_Delimetr || /* VALUE */
+'' || v_Next_Line || -- Версия передающей программы <наименование программы> <пробел> <версия программы>
+'ТелОтпр' || v_Key_Value_Delimetr || v_Sender_Phone || v_Next_Line || -- Телефон отправителя
+'ДолжнОтпр' || v_Key_Value_Delimetr || v_Sender_Dolg || v_Next_Line || -- Должность отправителя
+'ФамОтпр' || v_Key_Value_Delimetr || v_Sender_FIO || v_Next_Line || -- Фамилия отправителя 
+'КолДок' || v_Key_Value_Delimetr || v_Number_Of_Docs || v_Next_Line || -- Количество документов -- ДТ: /КолДок/='1' ONE DOCUMENT? or depends?
+'ВерсФорм' || v_Key_Value_Delimetr || v_Format_Version || v_Next_Line || -- Версия формата
+v_Eob || v_Next_Line || -- End Of Block
+v_Eofr || v_Next_Line || -- End Of Fragment
+ --informacionnaya chast
+'ИдДок' || v_Key_Value_Delimetr || v_Guid || v_Next_Line || -- Идентификатор документа GUID
+'НомСправ' || v_Key_Value_Delimetr || /* VALUE */
+'' || v_Next_Line || -- Номер справки
+'ИННКО' || v_Key_Value_Delimetr || v_Bank_Inn || v_Next_Line || -- ИНН банка или Банка России
+'КППКО' || v_Key_Value_Delimetr || v_Bank_Kpp || v_Next_Line || -- КПП банка (филиала) или учреждения Банка России
+'БИК' || v_Key_Value_Delimetr || v_Bank_Bik || v_Next_Line || -- БИК банка (филиала) или учреждения Банка России
+'НаимКО' || v_Key_Value_Delimetr || v_Bank_Name || v_Next_Line || -- Наименование банка (филиала) или учреждения Банка России
+'НомФ' || v_Key_Value_Delimetr || v_Filial_Num || v_Next_Line || -- Номер филиала банка
+'НомЗапр' || v_Key_Value_Delimetr || v_Request_Num || v_Next_Line || -- Номер запроса или решения налогового органа
+'ДатаЗапр' || v_Key_Value_Delimetr || v_Request_Date || v_Next_Line || -- Дата запроса или решения налогового органа
+'КодНО' || v_Key_Value_Delimetr || v_No_Code || v_Next_Line || -- Код налогового органа -- Код налогового органа, направившего запрос или решение, по справочнику СОУН
+'ИНННП' || v_Key_Value_Delimetr || v_Inn_Np || v_Next_Line || -- ИНН /КИО налогоплательщикаИНН /КИО налогоплательщика -- <ИНН> | <ИННФЛ> | <КИО>
+'КППНП' || v_Key_Value_Delimetr || v_Kpp_Np || v_Next_Line || -- У -- КПП налогоплательщика 
+'НаимНП' || v_Key_Value_Delimetr || v_Organisation_Name || v_Next_Line || -- У -- Наименование организации
+'ФИОИП' || v_Key_Value_Delimetr || v_Fio_Ip || v_Next_Line || -- У -- ФИО индивидуального предпринимателя, нотариуса, адвоката
+'ДолжнПрБ' || v_Key_Value_Delimetr || v_PrB_Dolg || v_Next_Line || -- Должность представителя банка
+'ФИОПрБ' || v_Key_Value_Delimetr || v_PrB_FIO || v_Next_Line || -- Ф.И.О представителя банка
+'ДатаСправ' || v_Key_Value_Delimetr || To_Char(v_Balance_Info_Date, 'DD.MM.YYYY') || v_Next_Line || -- По состоянию на дату
+'ДатаСооб' || v_Key_Value_Delimetr || To_Char(v_Date, 'DD.MM.YYYY') || v_Next_Line || -- Дата формирования справки
+v_Eob || v_Next_Line; -- End Of Block
+-- schet/scheta does exist REPIT FOR ALL_____________________________________________________________________________________________
+indexR := tblRespDt.FIRST;
+WHILE indexR IS NOT NULL LOOP
+IF tblRespDt(indexR).erCode IS NULL THEN
+-- add acc data________________________________________________________
+v_File_Body := v_File_Body || 'НомСч' || v_Key_Value_Delimetr || tblRespDt(indexR).accNum || v_Next_Line || -- Номер счета
+'ВидСч' || v_Key_Value_Delimetr || tblRespDt(indexR).accType || v_Next_Line || -- Вид счета -- <текст> в соответствии с Инструкцией Банка России от 14.09.2006 № 28-И
+'ВалСч' || v_Key_Value_Delimetr || tblRespDt(indexR).accCurr || v_Next_Line || -- Цифровой код валюты счета
+'Остаток' || v_Key_Value_Delimetr || tblRespDt(indexR).accRemainder || v_Next_Line || -- Остаток денежных средств на счете
+v_Eob || v_Next_Line; -- End Of Block
+ELSE
+NULL;
+/*
+            TODO: owner="btsgrenov" created="18.06.2014"
+            text="Process error if needed"
+            */
+END IF;
+indexR := tblRespDt.NEXT(indexR);
+END LOOP;
+-- chars to finish of file
+v_File_Body := v_File_Body || v_Eofr || v_Next_Line || -- End Of Fragment
+v_Eof || v_Next_Line; -- End Of File
+--__INSERTING TO TABLES______________________________________________________________________________________________________________________________
+-- new request_out
+INSERT INTO Requestout
+(Idrequestout,
+Idmsg,
+Numdoc,
+Dtdoc,
+Dtexecute,
+Filial,
+Idoperator,
+Priority,
+Flag,
+Livestate,
+Operstate,
+Idoper,
+Idsproperrequest,
+Idrequest,
+Flaganswer,
+Filename,
+Fileid,
+Idacc,
+Bik,
+Codebanksystem,
+Idtpoper,
+Isstruct)
+VALUES
+(Genid_Requestout.Nextval,
+v_Guid,
+v_Request_Data.Numdoc,
+v_Request_Data.Dtdoc,
+v_Request_Data.Dtexecute,
+v_Request_Data.Filial,
+v_Request_Data.Idoperator,
+v_Request_Data.Priority,
+v_Request_Data.Flag,
+NULL,
+NULL, /* livestate, operstate,*/
+aIdoper,
+aIdoperrequestwork,
+aIdrequest,
+NULL, /*flaganswer,*/
+NULL, /*v_Filename,*/
+NULL, /*fileid*/
+v_Request_Data.Idacc,
+v_Request_Data.Bik,
+NULL, /*codebanksysytem*/
+3014,
+100 /*isstruct*/);
+-- new request out xml
+INSERT INTO Requestoutxml
+(Idrequestout, Xmlcrypt, Xmlopen, Namepath, Namefile, Doper, Statefile, Idbatch)
+VALUES
+(Genid_Requestout.Currval, NULL, v_File_Body, NULL, /*v_Filename,*/ NULL, Trunc(SYSDATE), NULL, NULL);
+--__CODE_____________________________________________________________________________________________________________________________________________
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = v_Result_Oper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN Errcode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+Errcode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 3014',
+ errMsg);
+v_Result_Oper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = v_Result_Oper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN Errcode;
+END;
+-- Анализ счетов исключений для ареста (2021)
+FUNCTION doMAC_AN_IS_ACC_NotListArest(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode       INTEGER := 0;
+vResultOper   INTEGER := 10;
+isTransit     BOOLEAN; --  Транзитные счета – 14 или 15 разряд счета = 1;
+isSecondOrder BOOLEAN; -- Счета 2-го порядка  - 47405;
+isCumulative  BOOLEAN; -- Накопительные счета – 14 разряд счета = 9
+vIdAcc        Request.Idacc%TYPE;
+BEGIN
+errMsg := NULL;
+/*
+      TODO: owner="btsgrenov" created="15.06.2014" closed="19.06.2014"
+      text="make 2021 macros"
+      */
+/*
+      TODO: owner="btsgrenov" created="19.06.2014"
+      text="транзитный накопительный и второго порядка"
+      */
+/*
+        1. Транзитные счета – 14 или 15 разряд счета =1:         за основу берется расчетный?
+        2. Счета 2-го порядка  - 47405;    пример 47405хххххххххххххххххххх?   - может стоит добавить в sprtpaccetl?
+        3. Накопительные счета – 14 разряд счета =9:          за основу берется расчетный?
+      */
+SELECT Idacc
+INTO   vIdAcc
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+IF substr(vIdAcc, 14, 1) = '1' THEN
+isTransit := TRUE;
+ELSE
+isTransit := FALSE;
+END IF;
+IF substr(vIdAcc, 14, 1) = '9' THEN
+isCumulative := TRUE;
+ELSE
+isCumulative := FALSE;
+END IF;
+IF substr(vIdAcc, 1, 5) = '47405' THEN
+isSecondOrder := TRUE;
+ELSE
+isSecondOrder := FALSE;
+END IF;
+IF isTransit OR isCumulative OR isSecondOrder THEN
+vResultOper := 4; -- yes, exclude         
+ELSE
+vResultOper := 5; -- no, dont exclude
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2021',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Анализ решения: решение об аресте (2022)
+FUNCTION doMAC_AN_is_Acc_Arest(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+v_ID_Tp_Msg REQUEST.Tpmsg%TYPE;
+ex_InvalidTpMsg EXCEPTION;
+BEGIN
+errMsg := NULL;
+SELECT Tpmsg
+INTO   v_ID_Tp_Msg
+FROM   request
+WHERE  idrequest = aIdRequest;
+IF v_ID_Tp_Msg = 9 THEN
+-- answerYES
+vResultOper := 4;
+ELSIF v_ID_Tp_Msg = 10 THEN
+vResultOper := 5;
+ELSE
+RAISE ex_InvalidTpMsg; --raise ex_InvalidTpMsg;
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2022',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Подготовка pb2_35_клиент не найден (3015)
+FUNCTION doMAC_PREP_F_PB2_35_NO_CLIENT(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+v_ID_Tp_Msg REQUEST.Tpmsg%TYPE;
+ex_InvalidTpMsg EXCEPTION;
+BEGIN
+errMsg := NULL;
+SELECT Tpmsg
+INTO   v_ID_Tp_Msg
+FROM   request
+WHERE  idrequest = aIdRequest;
+IF v_ID_Tp_Msg = 9 THEN
+-- answerYES
+/*
+         TODO: owner="btsgrenov" created="15.06.2014" closed="16.06.2014"
+         text="ask if 4 = yes"
+         */
+vResultOper := 4;
+ELSIF v_ID_Tp_Msg = 10 THEN
+vResultOper := 5;
+ELSE
+NULL; --raise ex_InvalidTpMsg;
+END IF;
+/*
+      TODO: owner="btsgrenov" created="19.06.2014"
+      text="pb2_35 form?"
+      */
+/*
+      TODO: owner="btsgrenov" created="19.06.2014"
+      text="create accs on client not found
+            
+            errCode        INTEGER := 0;
+               vResultOper    INTEGER := 10;
+               Vpbtext        VARCHAR2(1024);
+               vReqDat        Request%ROWTYPE;
+               vReceivedFName Requestxml.Filename%TYPE;
+               vOutFName      Requestout.Filename%TYPE;
+               vIdMsg         Request.Idmsg%TYPE;
+               vIdRequestOut  INTEGER;
+              BEGIN
+               errMsg := NULL;
+              
+               SELECT *
+               INTO   vReqDat
+               FROM   Request
+               WHERE  Idrequest = aIdRequest;
+              
+               SELECT Filename
+               INTO   vReceivedFName
+               FROM   Requestxml
+               WHERE  Idrequest = aIdRequest;
+              
+               vOutFName := 'pb1_' || vReceivedFName;
+               Vpbtext   := vReceivedFName || '###' || Chr(10) || '10@@@' || Chr(10) || To_Char(SYSDATE, 'YYYY-MM-DD') || '@@@' || Chr(10) || -- date завершения проверки дока
+                      To_Char(SYSDATE, 'HH24:MI:SS') || '@@@' || Chr(10) || -- time завершения проверки дока
+                      '===';
+              
+               -- create request out statement
+               SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')) Guid
+               INTO   vIdMsg
+               FROM   Dual;
+              
+               vIdRequestOut := Genid_Requestout.Nextval;
+              
+               INSERT INTO Requestout
+                 (Idrequestout,
+                  Idmsg,
+                  Numdoc,
+                  Dtdoc,
+                  Dtexecute,
+                  Filial,
+                  Idoperator,
+                  Priority,
+                  Flag,
+                  Livestate,
+                  Operstate,
+                  Idoper,
+                  Idsproperrequest,
+                  Idrequest,
+                  Flaganswer,
+                  Filename,
+                  Fileid,
+                  Idacc,
+                  Bik,
+                  Codebanksystem,
+                  Idtpoper,
+                  Isstruct)
+               VALUES
+                 (vIdRequestOut,
+                  vIdMsg,
+                  vReqDat.Numdoc,
+                  vReqDat.Dtdoc,
+                  vReqDat.Dtexecute,
+                  vReqDat.Filial,
+                  vReqDat.Idoperator,
+                  vReqDat.Priority,
+                  vReqDat.Flag,
+                  NULL,
+                  NULL, /* livestate, operstate,*
+                  aIdOper,
+                  aIdOperRequestWork,
+                  aIdRequest,
+                  NULL, /*flaganswer,*
+                  vOutFName,
+                  NULL, /*fileid
+                  vReqDat.Idacc,
+                  vReqDat.Bik,
+                  NULL, /*codebanksysytem*
+                  wefwe,
+                  100 /*isstruct*);
+               -- todo
+               INSERT INTO Requestoutxml
+                 (Idrequestout, Xmlcrypt, Xmlopen, Namepath, Namefile, Doper, Statefile, Idbatch)
+               VALUES
+                 (vIdRequestOut, NULL, TO_CLOB(vPbText), NULL /*Namepath*, vOutFName, Trunc(SYSDATE), NULL, NULL);
+              
+               UPDATE REQUEST R
+               SET    R.NAMEMSGACC = vOutFName
+               WHERE  IDREQUEST = aIdRequest;"
+      */
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2022',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Подготовка pb2_35 счёт в списке исключений для ареста (3013)
+FUNCTION doMAC_PREP_F_PB2_35_EXCL_Arest(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode        INTEGER := 0;
+vResultOper    INTEGER := 10;
+Vpbtext        VARCHAR2(1024);
+vReqDat        Request%ROWTYPE;
+vReceivedFName Requestxml.Filename%TYPE;
+vOutFName      Requestout.Filename%TYPE;
+vIdMsg         Request.Idmsg%TYPE;
+vIdRequestOut requestout.idrequestout%TYPE;
+BEGIN
+errMsg := NULL;
+SELECT *
+INTO   vReqDat
+FROM   Request
+WHERE  Idrequest = aIdRequest;
+SELECT Filename
+INTO   vReceivedFName
+FROM   Requestxml
+WHERE  Idrequest = aIdRequest;
+vOutFName := 'pb2_' || vReceivedFName;
+Vpbtext   := vReceivedFName || '###' || Chr(10) || '35;Клиент не найден@@@' || Chr(10) || To_Char(SYSDATE, 'YYYY-MM-DD') || '@@@' || Chr(10) || -- date завершения проверки дока
+To_Char(SYSDATE, 'HH24:MI:SS') || '@@@' || Chr(10) || -- time завершения проверки дока
+'===';
+-- create request out statement
+SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')) Guid
+INTO   vIdMsg
+FROM   Dual;
+vIdRequestOut := Genid_Requestout.Nextval;
+INSERT INTO Requestout
+(Idrequestout,
+Idmsg,
+Numdoc,
+Dtdoc,
+Dtexecute,
+Filial,
+Idoperator,
+Priority,
+Flag,
+Livestate,
+Operstate,
+Idoper,
+Idsproperrequest,
+Idrequest,
+Flaganswer,
+Filename,
+Fileid,
+Idacc,
+Bik,
+Codebanksystem,
+Idtpoper,
+Isstruct)
+VALUES
+(vIdRequestOut,
+vIdMsg,
+vReqDat.Numdoc,
+vReqDat.Dtdoc,
+vReqDat.Dtexecute,
+vReqDat.Filial,
+vReqDat.Idoperator,
+vReqDat.Priority,
+vReqDat.Flag,
+NULL,
+NULL, /* livestate, operstate,*/
+aIdOper,
+aIdOperRequestWork,
+aIdRequest,
+NULL, /*flaganswer,*/
+vOutFName,
+NULL, /*fileid*/
+vReqDat.Idacc,
+vReqDat.Bik,
+NULL, /*codebanksysytem*/
+3013,
+100 /*isstruct*/);
+INSERT INTO Requestoutxml
+(Idrequestout, Xmlcrypt, Xmlopen, Namepath, Namefile, Doper, Statefile, Idbatch)
+VALUES
+(vIdRequestOut, NULL, TO_CLOB(vPbText), NULL /*Namepath*/, vOutFName, Trunc(SYSDATE), NULL, NULL);
+UPDATE REQUEST R
+SET    R.NAMEMSGACC = vOutFName
+WHERE  IDREQUEST = aIdRequest;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 3013',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Поиск инкассового поручения в СОИД(2024)    
+FUNCTION doMAC_FIND_INKASS(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+CURSOR Cur_Request_Attrs IS
+SELECT *
+FROM   Requestattr
+WHERE  Idrequest = aIdRequest;
+inkassReqData  Request%ROWTYPE;
+v_Request_Attr Requestattr%ROWTYPE;
+aSNum          Requestattr.Valueattr%TYPE := NULL;
+aNumDoc        Requestattr.Valueattr%TYPE := NULL;
+aDtDoc         Requestattr.Valueattr%TYPE := NULL;
+aIdFo          Request.idfo%TYPE := NULL;
+BEGIN
+errMsg := NULL;
+-- searching for trebovanie
+OPEN Cur_Request_Attrs;
+LOOP
+FETCH Cur_Request_Attrs
+INTO v_Request_Attr;
+EXIT WHEN Cur_Request_Attrs%NOTFOUND;
+IF instr(Upper('КодНО'), Upper(v_Request_Attr.Tagattr)) > 0 THEN
+aSNum := v_Request_Attr.Valueattr;
+ELSIF instr(Upper('ДатаПоруч'), Upper(v_Request_Attr.Tagattr)) > 0 THEN
+aDtDoc := v_Request_Attr.Valueattr;
+ELSIF instr(Upper('НомПоруч'), Upper(v_Request_Attr.Tagattr)) > 0 THEN
+aNumDoc := v_Request_Attr.Valueattr;
+END IF;
+END LOOP;
+CLOSE Cur_Request_Attrs;
+IF aSNum IS NULL THEN
+SELECT idfo
+INTO   aIdFo
+FROM   request
+WHERE  idrequest = aIdRequest;
+ELSE
+SELECT idoffice
+INTO   aIdFo
+FROM   office
+WHERE  snumclient = aSNum
+AND    isstruct = 100;
+END IF;
+-- searching inkass
+SELECT *
+INTO   inkassReqData
+FROM   request
+WHERE  idfo = aIdFo
+AND    dtdoc = aDtDoc
+AND    numdoc = aNumDoc;
+/*
+      TODO: owner="btsgrenov" created="16.06.2014"
+      text="ask alevtina"
+      */
+--kod
+/*INSERT INTO requestattr
+         (idrequest, idattr, tagattr, typeattr, valueattr, descattr, attrmode, doper, stateattr, numattr)
+      VALUES
+         ();*/
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2024',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--  Формирование запроса в смежные Системы (ПС42)  (7018)         
+FUNCTION doMAC_FORM_REQ_ADJ_SYS42(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode        INTEGER := 0;
+vResultOper    INTEGER := 10;
+vReqDat        Request%ROWTYPE;
+vIdReqout      NUMBER;
+v_Request_Attr RequestAttr%ROWTYPE;
+vIdMsg         requestout.idmsg%TYPE;
+v_Date DATE := TRUNC(SYSDATE);
+CURSOR Cur_Request_Attrs IS
+SELECT *
+FROM   Requestattr
+WHERE  Idrequest = aIdRequest;
+BEGIN
+errMsg := NULL;
+SELECT *
+INTO   vReqDat
+FROM   request
+WHERE  idrequest = aIdRequest;
+-- create request out statement
+SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')) Guid
+INTO   vIdMsg
+FROM   Dual;
+vIdReqout := Genid_Requestout.Nextval;
+INSERT INTO Requestout
+(Idrequestout,
+Idmsg,
+Numdoc,
+Dtdoc,
+Dtexecute,
+Filial,
+Idoperator,
+Priority,
+Flag,
+Livestate,
+Operstate,
+Idoper,
+Idsproperrequest,
+Idrequest,
+Flaganswer,
+Filename,
+Fileid,
+Idacc,
+Bik,
+Codebanksystem,
+Idtpoper,
+Isstruct)
+VALUES
+(vIdReqout,
+vIdMsg,
+vReqDat.Numdoc,
+vReqDat.Dtdoc,
+vReqDat.Dtexecute,
+vReqDat.Filial,
+vReqDat.Idoperator,
+vReqDat.Priority,
+NULL,
+NULL,
+NULL, /* flag, livestate, operstate,*/
+aIdOper,
+aIdOperRequestWork,
+aIdRequest,
+0,
+NULL, /*vOutFName,*/
+NULL, /*fileid*/
+vReqDat.Idacc,
+vReqDat.Bik,
+NULL,
+Pkg_Constants.Mac_Form_Req_Adj_Sys42,
+1 /*isstruct*/);
+OPEN Cur_Request_Attrs;
+LOOP
+FETCH Cur_Request_Attrs
+INTO v_Request_Attr;
+EXIT WHEN Cur_Request_Attrs%NOTFOUND;
+CASE Upper(v_Request_Attr.Tagattr)
+WHEN Upper('ИННКО') THEN
+INSERT INTO Requestoutattr
+(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+VALUES
+(vIdReqout, --IDREQUESTOUT
+Genid_RequestAttr.Nextval, --IDATTR
+'ИННКО', --TAGATTR
+3, --TYPEATTR
+v_Request_Attr.ValueAttr, --VALUEATTR
+'ИННКО', --DESCATTR
+v_Date --DOPER
+);
+WHEN Upper('КППКО') THEN
+INSERT INTO Requestoutattr
+(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+VALUES
+(vIdReqout, --IDREQUESTOUT
+Genid_RequestAttr.Nextval, --IDATTR
+'КППКО', --TAGATTR
+3, --TYPEATTR
+v_Request_Attr.ValueAttr, --VALUEATTR
+'КППКО', --DESCATTR
+v_Date --DOPER
+);
+WHEN Upper('НаиКО') THEN
+INSERT INTO Requestoutattr
+(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+VALUES
+(vIdReqout, --IDREQUESTOUT
+Genid_RequestAttr.Nextval, --IDATTR
+'НаимКО', --TAGATTR
+3, --TYPEATTR
+v_Request_Attr.ValueAttr, --VALUEATTR
+'НаимКО', --DESCATTR
+v_Date --DOPER
+);
+WHEN Upper('ФИОИП') THEN
+INSERT INTO Requestoutattr
+(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+VALUES
+(vIdReqout, --IDREQUESTOUT
+Genid_RequestAttr.Nextval, --IDATTR
+'ФИОИП', --TAGATTR
+3, --TYPEATTR
+v_Request_Attr.ValueAttr, --VALUEATTR
+'ФИОИП', --DESCATTR
+v_Date --DOPER
+);
+ELSE
+-- unneded data from other fields
+NULL;
+END CASE;
+END LOOP;
+CLOSE Cur_Request_Attrs;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 7018',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Анализ "Клиент идентифицирован"  (2027)
+FUNCTION doMAC_AN_CLIENT_IDED(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+v_Response_ID   response.idresponse%TYPE;
+v_Response_Attr responseattr%ROWTYPE;
+CURSOR Cur_Response_Attrs IS
+SELECT *
+FROM   Responseattr
+WHERE  Idresponse = v_Response_Id;
+BEGIN
+errMsg      := NULL;
+vResultOper := 5;
+SELECT Idresponse
+INTO   v_Response_ID
+FROM   Response
+WHERE  idrequestout IN (SELECT idrequestout
+FROM   Operrequest
+WHERE  Idrequest = aIdRequest
+AND    Idtpoper = 5503);
+OPEN Cur_Response_Attrs;
+LOOP
+FETCH Cur_Response_Attrs
+INTO v_Response_Attr;
+EXIT WHEN Cur_Response_Attrs%NOTFOUND;
+IF Instr(Upper(v_Response_Attr.Tagattr), 'CUSTOMERID') > 0 THEN
+IF v_Response_Attr.Valueattr > 0.5 THEN
+vResultOper := 4;
+END IF;
+END IF;
+END LOOP;
+CLOSE Cur_Response_Attrs;
+--kod
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2027',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Квитанции нет более 3-х раб.дней (П365) (2023)
+FUNCTION doMAC_KVIT_PAST3_DAYS(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vtimebegin    DATE;
+Vidopermaster INTEGER;
+BEGIN
+errMsg := NULL;
+BEGIN
+SELECT Idopermaster
+INTO   Vidopermaster
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+EXCEPTION
+WHEN OTHERS THEN
+Vidopermaster := 0;
+END;
+IF Vidopermaster > 0 THEN
+SELECT Timebegin
+INTO   Vtimebegin
+FROM   Operrequest
+WHERE  Idoper = Vidopermaster;
+IF Vtimebegin IS NOT NULL THEN
+SELECT CASE
+WHEN (COUNT(Opdate) - 1) > 3 THEN
+ 4
+ELSE
+ 5
+END
+INTO   vResultOper
+FROM   Calendar
+WHERE  Opdate BETWEEN Trunc(Vtimebegin) AND Trunc(SYSDATE)
+AND    Is_Holiday = 0;
+ELSE
+vResultOper := 1;
+errCode     := 3006;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2023',
+ errMsg);
+END IF;
+ELSE
+vResultOper := 1;
+errCode     := 3005;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2023',
+ errMsg);
+END IF;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2023',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Интерпретация ответа гос.органа "Квитанция" (П365) (2025)
+FUNCTION doMAC_IS_KVIT_P365(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vidopermaster   INTEGER;
+Cntnotprocessed INTEGER;
+BEGIN
+errMsg := NULL;
+BEGIN
+SELECT Idopermaster
+INTO   Vidopermaster
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+EXCEPTION
+WHEN OTHERS THEN
+Vidopermaster := 0;
+END;
+IF Vidopermaster > 0 THEN
+SELECT COUNT(r.Idresponse)
+INTO   Cntnotprocessed
+FROM   Response r
+WHERE  r.Idoper = Vidopermaster
+AND    Nvl(r.Processed, 0) = 0
+AND    Nvl(r.Idtpresp, 0) = 1;
+IF Cntnotprocessed = 0 THEN
+vResultOper := 5;
+ELSE
+vResultOper := 4;
+END IF;
+ELSE
+vResultOper := 1;
+errCode     := 3005;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2025',
+ errMsg);
+END IF;
+UPDATE Operrequest
+SET    Resultoper = vResultOper, State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2025',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+-- Интерпретация ответа "Квитанция положительная"  (П365)   (2026)
+FUNCTION doMAC_IS_KVIT_OK_P365(aIdOperRequestWork IN INTEGER,
+aIdOper            IN INTEGER,
+aIdRequest         IN INTEGER,
+errMsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode     INTEGER := 0;
+vResultOper INTEGER := 10;
+Vidopermaster        INTEGER;
+Cntbadresponseresult INTEGER;
+BEGIN
+errMsg := NULL;
+BEGIN
+SELECT Idopermaster
+INTO   Vidopermaster
+FROM   Operrequest
+WHERE  Idoper = aIdOper;
+EXCEPTION
+WHEN OTHERS THEN
+Vidopermaster := 0;
+END;
+IF Vidopermaster > 0 THEN
+SELECT COUNT(Idresponse)
+INTO   Cntbadresponseresult
+FROM   Response r
+WHERE  Idoper = Vidopermaster
+AND    Nvl(r.Processed, 0) = 0
+AND    Nvl(r.Idtpresp, 0) = 1
+AND    Nvl(r.Tpresult, 0) <> 4;
+UPDATE Response r
+SET    Processed = 1
+WHERE  Idoper = Vidopermaster
+AND    Nvl(r.Processed, 0) = 0
+AND    Nvl(r.Idtpresp, 0) = 1;
+IF Cntbadresponseresult = 0 THEN
+vResultOper := 4;
+ELSE
+vResultOper := 5;
+END IF;
+ELSE
+vResultOper := 1;
+errCode     := 3005;
+errMsg      := Pkg_Logoper.Geterrormsg(errCode);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2026',
+ errMsg);
+END IF;
+UPDATE Operrequest
+SET    Resultoper = vResultOper, State = Pkg_Constants.State_Finish
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2026',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+--  Генерация названия сообщения BOS (7009)   doMAC_GEN_MSG_NAME_BOS 
+FUNCTION doMAC_GEN_MSG_NAME_BOS(aIdOperRequestWork IN INTEGER,
+ aIdOper            IN INTEGER,
+ aIdRequest         IN INTEGER,
+ Errmsg             OUT VARCHAR2) RETURN INTEGER IS
+errCode             INTEGER := 0;
+vResultOper         INTEGER := 10;
+v_Doc_Counter       NUMBER := 0;
+v_Received_Filename VARCHAR2(500);
+v_Filename          VARCHAR2(500);
+vIdReqOut           requestout.idrequestout%TYPE;
+BEGIN
+errMsg := NULL;
+/*
+      TODO: owner="btsgrenov" created="16.06.2014" closed="18.06.2014"
+      text="separate bos filename NADO LI ETO?"
+      */
+-- CREATING FILENAME
+SELECT FILENAME
+INTO   v_Received_Filename
+FROM   requestxml
+WHERE  idrequest = aIdRequest;
+SELECT idRequestOut
+INTO   vIdReqOut
+FROM   requestout
+WHERE  idrequest = aIdRequest
+AND    idtpoper = 3014;
+SELECT COUNT(*)
+INTO   v_Doc_Counter
+FROM   requestout
+WHERE  idrequestout = vIdReqOut;
+v_Doc_Counter := v_Doc_Counter + 1;
+v_Filename := 'BOS' || v_doc_counter || '_' || v_Received_Filename || '.txt';
+-- END CREATING FILENAME
+UPDATE Requestout
+SET    Filename = v_Filename
+WHERE  idrequestout = vIdReqOut;
+-- new request out xml
+UPDATE Requestoutxml
+SET    nameFile = v_Filename
+WHERE  idrequestout = vIdReqOut;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+EXCEPTION
+WHEN OTHERS THEN
+ROLLBACK;
+errCode := SQLCODE;
+errMsg  := Substr(SQLERRM, 1, 1024);
+Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
+ Pkg_Constants.Is_Do_Operrequest,
+ aIdRequest,
+ NULL,
+ 'Код макроса: 2014',
+ errMsg);
+vResultOper := 1;
+UPDATE Operrequest
+SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
+WHERE  Idoper = aIdOper;
+UPDATE Operrequestwork
+SET    Opstate = 10
+WHERE  Idoperrequestwork = aIdOperRequestWork;
+COMMIT;
+RETURN errCode;
+END;
+END;
