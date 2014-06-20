@@ -1,5 +1,5 @@
 CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle_C2 IS
---Перевод в карантин по коду операции
+--Перевод в карантин по коду операци
 PROCEDURE Set_Flag_By_Idoper(aIdOper  IN INTEGER,
  Anewflag IN INTEGER,
  Astate   IN INTEGER) IS
