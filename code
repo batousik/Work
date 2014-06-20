@@ -1,5 +1,5 @@
 CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle_C2 IS
---Перевод в карантин по коду операци
+--Перевод в карантин по коду операции
 PROCEDURE Set_Flag_By_Idoper(aIdOper  IN INTEGER,
  Anewflag IN INTEGER,
  Astate   IN INTEGER) IS
@@ -3523,7 +3523,7 @@ NULL, /*fileid*/
 vReqDat.Idacc,
 vReqDat.Bik,
 Vidbanksystem,
-Pkg_Constants.Mac_Form_Req_Adj_Sys86,
+Pkg_Constants.Mac_Form_Req_Adj_Sys,
 1 /*isstruct*/);
 --БИК
 INSERT INTO Requestoutattr
@@ -5895,7 +5895,6 @@ vReqDat        Request%ROWTYPE;
 vIdReqout      NUMBER;
 v_Request_Attr RequestAttr%ROWTYPE;
 vIdMsg         requestout.idmsg%TYPE;
-v_Date DATE := TRUNC(SYSDATE);
 CURSOR Cur_Request_Attrs IS
 SELECT *
 FROM   Requestattr
@@ -5911,6 +5910,52 @@ SELECT Lower(Regexp_Replace(Sys_Guid(), '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\
 INTO   vIdMsg
 FROM   Dual;
 vIdReqout := Genid_Requestout.Nextval;
+OPEN Cur_Request_Attrs;
+LOOP
+FETCH Cur_Request_Attrs
+INTO v_Request_Attr;
+EXIT WHEN Cur_Request_Attrs%NOTFOUND;
+/*CASE Upper(v_Request_Attr.Tagattr)
+            WHEN Upper('ИННКО') THEN
+               INSERT INTO Requestoutattr
+                  (Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+               VALUES
+                  (vIdReqout, --IDREQUESTOUT
+                   Genid_Requestattr.Nextval, --IDATTR
+                   'BIK', --TAGATTR
+                   3, --TYPEATTR
+                   vReqDat.Bik, --VALUEATTR
+                   'БИК', --DESCATTR
+                   v_Request_Attr.Doper --DOPER
+                   );
+            WHEN Upper('КППКО') THEN
+               v_Bank_Kpp := v_Request_Attr.Valueattr;
+            WHEN Upper('БИК') THEN
+               v_Bank_Bik := v_Request_Attr.Valueattr;
+            WHEN Upper('НаиКО') THEN
+               v_Bank_Name := v_Request_Attr.Valueattr;
+            WHEN Upper('НомФ') THEN
+               v_Filial_Num := v_Request_Attr.Valueattr;
+            WHEN Upper('НомЗапр') THEN
+               v_Request_Num := v_Request_Attr.Valueattr;
+            WHEN Upper('ДатаЗапр') THEN
+               v_Request_Date := v_Request_Attr.Valueattr;
+            WHEN Upper('КодНО') THEN
+               v_No_Code := v_Request_Attr.Valueattr;
+            WHEN Upper('ИНННП') THEN
+               v_Inn_Np := v_Request_Attr.Valueattr;
+            WHEN Upper('КППНП') THEN
+               v_Kpp_Np := v_Request_Attr.Valueattr;
+            WHEN Upper('НаимНП') THEN
+               v_Organisation_Name := v_Request_Attr.Valueattr;
+            WHEN Upper('ФИОИП') THEN
+               v_Fio_Ip := v_Request_Attr.Valueattr;
+            ELSE
+               -- unneded data from other fields
+               NULL;
+         END CASE;*/
+END LOOP;
+CLOSE Cur_Request_Attrs;
 INSERT INTO Requestout
 (Idrequestout,
 Idmsg,
@@ -5955,68 +6000,9 @@ NULL, /*fileid*/
 vReqDat.Idacc,
 vReqDat.Bik,
 NULL,
-Pkg_Constants.Mac_Form_Req_Adj_Sys42,
+Pkg_Constants.Mac_Form_Req_Adj_Sys,
 1 /*isstruct*/);
-OPEN Cur_Request_Attrs;
-LOOP
-FETCH Cur_Request_Attrs
-INTO v_Request_Attr;
-EXIT WHEN Cur_Request_Attrs%NOTFOUND;
-CASE Upper(v_Request_Attr.Tagattr)
-WHEN Upper('ИННКО') THEN
-INSERT INTO Requestoutattr
-(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
-VALUES
-(vIdReqout, --IDREQUESTOUT
-Genid_RequestAttr.Nextval, --IDATTR
-'ИННКО', --TAGATTR
-3, --TYPEATTR
-v_Request_Attr.ValueAttr, --VALUEATTR
-'ИННКО', --DESCATTR
-v_Date --DOPER
-);
-WHEN Upper('КППКО') THEN
-INSERT INTO Requestoutattr
-(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
-VALUES
-(vIdReqout, --IDREQUESTOUT
-Genid_RequestAttr.Nextval, --IDATTR
-'КППКО', --TAGATTR
-3, --TYPEATTR
-v_Request_Attr.ValueAttr, --VALUEATTR
-'КППКО', --DESCATTR
-v_Date --DOPER
-);
-WHEN Upper('НаиКО') THEN
-INSERT INTO Requestoutattr
-(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
-VALUES
-(vIdReqout, --IDREQUESTOUT
-Genid_RequestAttr.Nextval, --IDATTR
-'НаимКО', --TAGATTR
-3, --TYPEATTR
-v_Request_Attr.ValueAttr, --VALUEATTR
-'НаимКО', --DESCATTR
-v_Date --DOPER
-);
-WHEN Upper('ФИОИП') THEN
-INSERT INTO Requestoutattr
-(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
-VALUES
-(vIdReqout, --IDREQUESTOUT
-Genid_RequestAttr.Nextval, --IDATTR
-'ФИОИП', --TAGATTR
-3, --TYPEATTR
-v_Request_Attr.ValueAttr, --VALUEATTR
-'ФИОИП', --DESCATTR
-v_Date --DOPER
-);
-ELSE
--- unneded data from other fields
-NULL;
-END CASE;
-END LOOP;
-CLOSE Cur_Request_Attrs;
+--kod
 UPDATE Operrequest
 SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
 WHERE  Idoper = aIdOper;
@@ -6419,3 +6405,4 @@ COMMIT;
 RETURN errCode;
 END;
 END;
+
