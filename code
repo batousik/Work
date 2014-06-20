@@ -1,4 +1,4 @@
-CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
+CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle_C2 IS
 
 	--Перевод в карантин по коду операции
 	PROCEDURE Set_Flag_By_Idoper(aIdOper  IN INTEGER,
@@ -1327,15 +1327,7 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 					Vfilenamepref := 'SKD';
 				END IF;
 			ELSE
-				vResultOper := 1;
-				errCode     := 3007;
-				errMsg      := pkg_logoper.getErrorMsg(errCode);
-				Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
-												  Pkg_Constants.Is_Do_Operrequest,
-												  aIdRequest,
-												  NULL,
-												  'Код макроса: 7002',
-												  errMsg);
+				Vfilenamepref := 'RRR';
 			END IF;
 		
 			--Запись результатов параметризации в Request
@@ -1345,8 +1337,8 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 					 Idbal2       = Vnidbal2,
 					 Tpclientacc  = Vtpclientacc,
 					 Tpmsg        = Vtpmsg,
-					 Idtpprimacy  = NVL(Idtpprimacy, 1),
-					 Numprimacy   = NVL(Numprimacy, '00'),
+					 Idtpprimacy  = 1,
+					 Numprimacy   = '00',
 					 Filenamepref = Vfilenamepref
 			WHERE  Idrequest = aIdRequest;
 		
@@ -3012,8 +3004,8 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 	BEGIN
 		errMsg := NULL;
 	
-		SELECT Idacc, Nvl(Tpmsg, 0)
-		INTO   vIdAcc, Vtpmsg
+		SELECT Idacc
+		INTO   vIdAcc
 		FROM   Request
 		WHERE  Idrequest = aIdRequest;
 	
@@ -3041,7 +3033,7 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 			END LOOP;
 		
 			IF Vtpacc = 0 THEN
-				Vtpacc := 5;
+				Vtpacc := 1;
 			END IF;
 		
 			--Определение TpClientAcc
@@ -3056,73 +3048,64 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 					Vtpclientacc := 7;
 			END;
 		
-			IF Vtpmsg = 0 THEN
-				--Определение TpMsg
+			--Определение TpMsg
+			BEGIN
+				SELECT To_Number(t.Column_Value)
+				INTO   Vtabint
+				FROM   TABLE(Pkg_Web.Getrequestattrvalue(aIdRequest, 'Код состояния счета')) t
+				WHERE  Rownum = 1;
+			EXCEPTION
+				WHEN OTHERS THEN
+					Vtabint := -1;
+			END;
+		
+			IF Vtabint = 1 THEN
+				Vtpmsg := 1; --Открытие
+			ELSIF Vtabint = 0 THEN
+				Vtpmsg := 2; --Закрытие
+			ELSE
 				BEGIN
 					SELECT To_Number(t.Column_Value)
 					INTO   Vtabint
-					FROM   TABLE(Pkg_Web.Getrequestattrvalue(aIdRequest, 'Код состояния счета')) t
+					FROM   TABLE(Pkg_Web.Getrequestattrvalue(aIdRequest, 'Признак изменений')) t
 					WHERE  Rownum = 1;
 				EXCEPTION
 					WHEN OTHERS THEN
 						Vtabint := -1;
 				END;
 			
-				/*if vTabInt = 1 then
-              vTpMsg := 1; --Открытие
-            elsif vTabInt = 0 then
-              vTpMsg := 2; --Закрытие
-            else
-              begin
-                select to_number(t.column_value)
-                  into vTabInt
-                  from table(PKG_WEB.getRequestAttrValue(aIdRequest, 'Признак изменений')) t
-                  where rownum = 1;
-              exception
-                when others then
-                  vTabInt := -1;
-              end;
-              
-              if vTabInt = 1 then
-                vTpMsg := 4; --Изменение реквизита счета в связи с реорганизацией Банка
-              else
-                vTpMsg := 3; --Изменение реквизита счета
-              end if;
-            end if;*/
-			
-				IF Vtabint = 0 THEN
-					--ЗАКРЫТИЕ
-					IF Vtpclientacc = 7 THEN
-						Vtpmsg := 2;
-					ELSE
-						Vtpmsg := 6;
-					END IF;
-				ELSIF Vtabint = 1 THEN
-					--ОТКРЫТИЕ
-					IF Vtpclientacc = 7 THEN
-						Vtpmsg := 1;
-					ELSE
-						Vtpmsg := 5;
-					END IF;
-				ELSIF Vtabint = 2 THEN
-					--ПРОЛОНГАЦИЯ
-					IF Vtpclientacc = 7 THEN
-						Vtpmsg := 3;
-					ELSE
-						Vtpmsg := 7;
-					END IF;
-				ELSIF Vtabint = 3 THEN
-					--МИГРАЦИЯ
-					IF Vtpclientacc = 7 THEN
-						Vtpmsg := 4;
-					ELSE
-						Vtpmsg := 8;
-					END IF;
+				IF Vtabint = 1 THEN
+					Vtpmsg := 4; --Изменение реквизита счета в связи с реорганизацией Банка
+				ELSE
+					Vtpmsg := 3; --Изменение реквизита счета
 				END IF;
 			END IF;
 		
+			--Определение IdTpPrimacy
+			BEGIN
+				SELECT To_Number(t.Column_Value)
+				INTO   Vidtpprimacy
+				FROM   TABLE(Pkg_Web.Getrequestattrvalue(aIdRequest, 'Признак электронного сообщения')) t
+				JOIN   Sprtpprimacy s ON (s.Idtpprimacy = To_Number(t.Column_Value))
+				WHERE  Rownum = 1;
+			EXCEPTION
+				WHEN OTHERS THEN
+					Vidtpprimacy := 1;
+			END;
+		
+			--Определение NumberPrimacy
+			BEGIN
+				SELECT Substr(t.Column_Value, -2, 2)
+				INTO   Vnumprimacy
+				FROM   TABLE(Pkg_Web.Getrequestattrvalue(aIdRequest, 'Тип сообщения')) t
+				WHERE  Rownum = 1;
+			EXCEPTION
+				WHEN OTHERS THEN
+					Vnumprimacy := '00';
+			END;
+		
 			--Определение префикса имени файла
-			IF Vtpmsg BETWEEN 1 AND 8 THEN
+			IF Vtpmsg BETWEEN 1 AND 4 THEN
 				IF Vtpclientacc BETWEEN 1 AND 6 THEN
 					Vfilenamepref := 'SBC';
 				ELSIF Vtpclientacc = 7 THEN
@@ -3131,15 +3114,7 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 					Vfilenamepref := 'SKD';
 				END IF;
 			ELSE
-				vResultOper := 1;
-				errCode     := 3007;
-				errMsg      := pkg_logoper.getErrorMsg(errCode);
-				Pkg_Logoper.Write_Logoper(Pkg_Constants.Lo_Request,
-												  Pkg_Constants.Is_Do_Operrequest,
-												  aIdRequest,
-												  NULL,
-												  'Код макроса: 7002',
-												  errMsg);
+				Vfilenamepref := 'RRR';
 			END IF;
 		
 			--Запись результатов параметризации в Request
@@ -3149,8 +3124,8 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 					 Idbal2       = Vnidbal2,
 					 Tpclientacc  = Vtpclientacc,
 					 Tpmsg        = Vtpmsg,
-					 Idtpprimacy  = NVL(Idtpprimacy, 1),
-					 Numprimacy   = NVL(Numprimacy, '00'),
+					 Idtpprimacy  = Vidtpprimacy,
+					 Numprimacy   = Vnumprimacy,
 					 Filenamepref = Vfilenamepref
 			WHERE  Idrequest = aIdRequest;
 		
@@ -3275,17 +3250,12 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 	BEGIN
 		errMsg := NULL;
 	
-		/*SELECT COUNT(Idnumberaccdt)
-      INTO   Vcntnumberaccdt
-      FROM   Numbermsgaccount_Dt
-      WHERE  Idrequest = aIdRequest;
-      
-      Vnumprimacy := To_Char(Vcntnumberaccdt);*/
+		SELECT COUNT(Idnumberaccdt)
+		INTO   Vcntnumberaccdt
+		FROM   Numbermsgaccount_Dt
+		WHERE  Idrequest = aIdRequest;
 	
-		SELECT TO_CHAR(TO_NUMBER(SUBSTR(R.NAMEMSGACC, 47, 2)) + 1)
-		INTO   Vnumprimacy
-		FROM   REQUEST R
-		WHERE  IDREQUEST = aIdRequest;
+		Vnumprimacy := To_Char(Vcntnumberaccdt);
 	
 		IF Length(Vnumprimacy) > 2 THEN
 			Vnumprimacy := Substr(Vnumprimacy, -2);
@@ -3344,19 +3314,12 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 	BEGIN
 		errMsg := NULL;
 	
-		/*SELECT COUNT(Idnumberaccdt)
-      INTO   Vcntnumberaccdt
-      FROM   Numbermsgaccount_Dt
-      WHERE  Idrequest = aIdRequest;
-      
-      Vnumprimacy := To_Char(Vcntnumberaccdt);
-      
-      */
+		SELECT COUNT(Idnumberaccdt)
+		INTO   Vcntnumberaccdt
+		FROM   Numbermsgaccount_Dt
+		WHERE  Idrequest = aIdRequest;
 	
-		SELECT TO_CHAR(TO_NUMBER(SUBSTR(R.NAMEMSGACC, 47, 2)) + 1)
-		INTO   Vnumprimacy
-		FROM   REQUEST R
-		WHERE  IDREQUEST = aIdRequest;
+		Vnumprimacy := To_Char(Vcntnumberaccdt);
 	
 		IF Length(Vnumprimacy) > 2 THEN
 			Vnumprimacy := Substr(Vnumprimacy, -2);
@@ -5531,11 +5494,11 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 		FROM   Request
 		WHERE  Idrequest = aIdRequest;
 		/*
-      TODO: owner="btsgrenov" created="19.06.2014"
-      text="транзитный
-            "
+      TODO: owner="btsgrenov" created="19.06.2014" closed="20.06.2014"
+      text="транзитный"
       */
-		IF getnametpacc(Accnum => vIdAcc) = 'Расчетный' AND substr(vIdAcc, 14, 1) = '1' THEN
+		IF substr(vIdAcc, 14, 1) = '1' THEN
+			-- getnametpacc(Accnum => vIdAcc) = 'Расчетный' AND 
 			vResultOper := 4;
 		ELSE
 			vResultOper := 5;
@@ -6340,13 +6303,13 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 	BEGIN
 		errMsg := NULL;
 		/*
-      TODO: owner="btsgrenov" created="15.06.2014"
+      TODO: owner="btsgrenov" created="15.06.2014" closed="19.06.2014"
       text="make 2021 macros"
       */
 	
 		/*
       TODO: owner="btsgrenov" created="19.06.2014"
-      text="транзитный"
+      text="транзитный накопительный и второго порядка"
       */
 	
 		/*
@@ -6366,7 +6329,7 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 			isTransit := FALSE;
 		END IF;
 	
-		IF substr(vIdAcc, 9, 1) = '1' THEN
+		IF substr(vIdAcc, 14, 1) = '9' THEN
 			isCumulative := TRUE;
 		ELSE
 			isCumulative := FALSE;
@@ -6379,9 +6342,9 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 		END IF;
 	
 		IF isTransit OR isCumulative OR isSecondOrder THEN
-			vResultOper := 5; -- yes, exclude         
+			vResultOper := 4; -- yes, exclude         
 		ELSE
-			vResultOper := 4; -- no, dont exclude
+			vResultOper := 5; -- no, dont exclude
 		END IF;
 	
 		UPDATE Operrequest
@@ -6891,6 +6854,8 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 		v_Request_Attr RequestAttr%ROWTYPE;
 		vIdMsg         requestout.idmsg%TYPE;
 	
+		v_Date DATE := TRUNC(SYSDATE);
+	
 		CURSOR Cur_Request_Attrs IS
 			SELECT *
 			FROM   Requestattr
@@ -6910,53 +6875,6 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 		FROM   Dual;
 	
 		vIdReqout := Genid_Requestout.Nextval;
-	
-		OPEN Cur_Request_Attrs;
-		LOOP
-			FETCH Cur_Request_Attrs
-				INTO v_Request_Attr;
-			EXIT WHEN Cur_Request_Attrs%NOTFOUND;
-			/*CASE Upper(v_Request_Attr.Tagattr)
-            WHEN Upper('ИННКО') THEN
-               INSERT INTO Requestoutattr
-                  (Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
-               VALUES
-                  (vIdReqout, --IDREQUESTOUT
-                   Genid_Requestattr.Nextval, --IDATTR
-                   'BIK', --TAGATTR
-                   3, --TYPEATTR
-                   vReqDat.Bik, --VALUEATTR
-                   'БИК', --DESCATTR
-                   v_Request_Attr.Doper --DOPER
-                   );
-            WHEN Upper('КППКО') THEN
-               v_Bank_Kpp := v_Request_Attr.Valueattr;
-            WHEN Upper('БИК') THEN
-               v_Bank_Bik := v_Request_Attr.Valueattr;
-            WHEN Upper('НаиКО') THEN
-               v_Bank_Name := v_Request_Attr.Valueattr;
-            WHEN Upper('НомФ') THEN
-               v_Filial_Num := v_Request_Attr.Valueattr;
-            WHEN Upper('НомЗапр') THEN
-               v_Request_Num := v_Request_Attr.Valueattr;
-            WHEN Upper('ДатаЗапр') THEN
-               v_Request_Date := v_Request_Attr.Valueattr;
-            WHEN Upper('КодНО') THEN
-               v_No_Code := v_Request_Attr.Valueattr;
-            WHEN Upper('ИНННП') THEN
-               v_Inn_Np := v_Request_Attr.Valueattr;
-            WHEN Upper('КППНП') THEN
-               v_Kpp_Np := v_Request_Attr.Valueattr;
-            WHEN Upper('НаимНП') THEN
-               v_Organisation_Name := v_Request_Attr.Valueattr;
-            WHEN Upper('ФИОИП') THEN
-               v_Fio_Ip := v_Request_Attr.Valueattr;
-            ELSE
-               -- unneded data from other fields
-               NULL;
-         END CASE;*/
-		END LOOP;
-		CLOSE Cur_Request_Attrs;
 	
 		INSERT INTO Requestout
 			(Idrequestout,
@@ -7004,7 +6922,67 @@ CREATE OR REPLACE PACKAGE BODY Pkg_Life_Cycle IS
 			 NULL,
 			 Pkg_Constants.Mac_Form_Req_Adj_Sys42,
 			 1 /*isstruct*/);
-		--kod
+	
+		OPEN Cur_Request_Attrs;
+		LOOP
+			FETCH Cur_Request_Attrs
+				INTO v_Request_Attr;
+			EXIT WHEN Cur_Request_Attrs%NOTFOUND;
+			CASE Upper(v_Request_Attr.Tagattr)
+				WHEN Upper('ИННКО') THEN
+					INSERT INTO Requestoutattr
+						(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+					VALUES
+						(vIdReqout, --IDREQUESTOUT
+						 Genid_RequestAttr.Nextval, --IDATTR
+						 'ИННКО', --TAGATTR
+						 3, --TYPEATTR
+						 v_Request_Attr.ValueAttr, --VALUEATTR
+						 'ИННКО', --DESCATTR
+						 v_Date --DOPER
+						 );
+				WHEN Upper('КППКО') THEN
+					INSERT INTO Requestoutattr
+						(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+					VALUES
+						(vIdReqout, --IDREQUESTOUT
+						 Genid_RequestAttr.Nextval, --IDATTR
+						 'КППКО', --TAGATTR
+						 3, --TYPEATTR
+						 v_Request_Attr.ValueAttr, --VALUEATTR
+						 'КППКО', --DESCATTR
+						 v_Date --DOPER
+						 );
+				WHEN Upper('НаиКО') THEN
+					INSERT INTO Requestoutattr
+						(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+					VALUES
+						(vIdReqout, --IDREQUESTOUT
+						 Genid_RequestAttr.Nextval, --IDATTR
+						 'НаимКО', --TAGATTR
+						 3, --TYPEATTR
+						 v_Request_Attr.ValueAttr, --VALUEATTR
+						 'НаимКО', --DESCATTR
+						 v_Date --DOPER
+						 );
+				WHEN Upper('ФИОИП') THEN
+					INSERT INTO Requestoutattr
+						(Idrequestout, Idattr, Tagattr, Typeattr, Valueattr, Descattr, Doper)
+					VALUES
+						(vIdReqout, --IDREQUESTOUT
+						 Genid_RequestAttr.Nextval, --IDATTR
+						 'ФИОИП', --TAGATTR
+						 3, --TYPEATTR
+						 v_Request_Attr.ValueAttr, --VALUEATTR
+						 'ФИОИП', --DESCATTR
+						 v_Date --DOPER
+						 );
+				ELSE
+					-- unneded data from other fields
+					NULL;
+			END CASE;
+		END LOOP;
+		CLOSE Cur_Request_Attrs;
 	
 		UPDATE Operrequest
 		SET    State = Pkg_Constants.State_Finish, Resultoper = vResultOper
